@@ -1,17 +1,25 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { ArgumentError, ConfigError } from '../src/errors.js';
 import {
+    DEFAULT_SKILL_AGENT,
     defaultSkillRoot,
     defaultSkillTarget,
-    installSkill,
     listSkillFiles,
+    packageSource,
     packagedSkillDir,
+    parseSkillsJson,
     readSkillFile,
+    readSkillLock,
+    runSkillsAction,
     skillStatus,
+    skillsAddArgs,
+    skillsRemoveArgs,
+    skillsUpdateArgs,
 } from '../src/skills.js';
 
 describe('bundled skill files', () => {
@@ -24,10 +32,7 @@ describe('bundled skill files', () => {
 
     it('lists the skill files in a stable order', () => {
         const files = listSkillFiles(packagedSkillDir());
-        assert.ok(files.includes('SKILL.md'));
-        assert.ok(files.includes('references/search-api.md'));
-        assert.ok(files.includes('agents/openai.yaml'));
-        assert.deepEqual(files, [...files].sort());
+        assert.deepEqual(files, ['SKILL.md', 'agents/openai.yaml', 'references/search-api.md']);
     });
 
     it('reads reference files', () => {
@@ -46,7 +51,84 @@ describe('bundled skill files', () => {
     });
 });
 
-describe('skill installation', () => {
+describe('skills CLI delegation', () => {
+    it('derives the source from the package repository', () => {
+        assert.equal(packageSource({ repository: { url: 'git+https://github.com/coolxll/feedly-cli.git' } }), 'coolxll/feedly-cli');
+        assert.equal(packageSource({ repository: 'https://github.com/foo/bar' }), 'foo/bar');
+        assert.equal(packageSource({}), '');
+    });
+
+    it('builds the documented `skills add` invocation', () => {
+        assert.deepEqual(skillsAddArgs({ source: 'coolxll/feedly-cli' }), [
+            '-y', 'skills@latest', 'add', 'coolxll/feedly-cli',
+            '-s', 'feedly-cli',
+            '-a', 'universal',
+            '-g', '-y', '--json',
+        ]);
+        // Project scope drops -g.
+        assert.ok(!skillsAddArgs({ source: 'x/y', global: false }).includes('-g'));
+        assert.ok(skillsAddArgs({ source: 'x/y', agent: 'claude-code' }).includes('claude-code'));
+        assert.equal(DEFAULT_SKILL_AGENT, 'universal');
+        assert.throws(() => skillsAddArgs({ source: '' }), ArgumentError);
+    });
+
+    it('builds update/remove invocations', () => {
+        assert.deepEqual(skillsUpdateArgs(), ['-y', 'skills@latest', 'update', 'feedly-cli', '-g', '-y']);
+        assert.deepEqual(skillsRemoveArgs(), ['-y', 'skills@latest', 'remove', 'feedly-cli', '-g', '-y']);
+    });
+
+    it('parses JSON even when the CLI prints a banner first', () => {
+        assert.deepEqual(parseSkillsJson('[{"status":"installed"}]'), [{ status: 'installed' }]);
+        assert.deepEqual(
+            parseSkillsJson('● Agent detected\n│\n[{"status":"installed","path":"/x"}]\n'),
+            [{ status: 'installed', path: '/x' }],
+        );
+        assert.deepEqual(parseSkillsJson('{"status":"ok"}'), { status: 'ok' });
+        assert.equal(parseSkillsJson(''), null);
+        assert.equal(parseSkillsJson('not json at all'), null);
+    });
+
+    function fakeSpawn({ code = 0, stdout = '', stderr = '', throwOnSpawn = false } = {}) {
+        return () => {
+            if (throwOnSpawn) throw new Error('spawn npx ENOENT');
+            const child = new EventEmitter();
+            child.stdout = new EventEmitter();
+            child.stderr = new EventEmitter();
+            child.kill = () => {};
+            setImmediate(() => {
+                if (stdout) child.stdout.emit('data', stdout);
+                if (stderr) child.stderr.emit('data', stderr);
+                child.emit('close', code);
+            });
+            return child;
+        };
+    }
+
+    it('returns parsed JSON on success', async () => {
+        const payload = await runSkillsAction({
+            args: ['add'],
+            spawnImpl: fakeSpawn({ stdout: '[{"status":"installed"}]' }),
+        });
+        assert.deepEqual(payload, [{ status: 'installed' }]);
+    });
+
+    it('surfaces failures with actionable errors', async () => {
+        await assert.rejects(
+            () => runSkillsAction({ args: ['add'], spawnImpl: fakeSpawn({ code: 1, stderr: 'network down' }) }),
+            /exited with code 1/,
+        );
+        await assert.rejects(
+            () => runSkillsAction({ args: ['add'], spawnImpl: fakeSpawn({ throwOnSpawn: true }) }),
+            /Could not run `npx skills`/,
+        );
+    });
+
+    it('treats a successful run without JSON as ok', async () => {
+        assert.equal(await runSkillsAction({ args: ['add'], spawnImpl: fakeSpawn({ stdout: 'done' }) }), null);
+    });
+});
+
+describe('skill status', () => {
     let home;
 
     beforeEach(() => {
@@ -62,43 +144,35 @@ describe('skill installation', () => {
         assert.equal(defaultSkillTarget({ home }), join(home, '.agents', 'skills', 'feedly-cli'));
     });
 
-    it('installs a copy into the target directory', () => {
+    it('reports not-installed when nothing is there', () => {
+        const status = skillStatus({ home });
+        assert.equal(status.installed, 'no');
+        assert.equal(status.mode, '');
+    });
+
+    it('reports an installed copy with lock metadata', () => {
         const target = defaultSkillTarget({ home });
-        const result = installSkill({ root: defaultSkillRoot({ home }) });
+        mkdirSync(target, { recursive: true });
+        cpSync(join(packagedSkillDir(), 'SKILL.md'), join(target, 'SKILL.md'));
+        mkdirSync(join(home, '.agents'), { recursive: true });
+        writeFileSync(join(home, '.agents', '.skill-lock.json'), JSON.stringify({
+            version: 3,
+            skills: { 'feedly-cli': { source: 'coolxll/feedly-cli', updatedAt: '2026-01-01T00:00:00.000Z' } },
+        }));
 
-        assert.equal(result.status, 'installed');
-        assert.equal(result.path, target);
-        assert.equal(existsSync(join(target, 'SKILL.md')), true);
-        assert.match(readFileSync(join(target, 'SKILL.md'), 'utf-8'), /name: feedly-cli/);
-        assert.equal(existsSync(join(target, 'references', 'search-api.md')), true);
-    });
-
-    it('does not clobber an existing install without --force', () => {
-        const root = defaultSkillRoot({ home });
-        installSkill({ root });
-
-        assert.equal(installSkill({ root }).status, 'exists');
-        assert.equal(installSkill({ root, force: true }).status, 'updated');
-    });
-
-    it('supports symlinks and dry runs', () => {
-        const root = defaultSkillRoot({ home });
-
-        const dry = installSkill({ root, dryRun: true });
-        assert.equal(dry.status, 'would-install');
-        assert.equal(existsSync(dry.path), false);
-
-        const linked = installSkill({ root, link: true });
-        assert.equal(linked.status, 'installed');
-        assert.equal(skillStatus({ root }).mode, 'symlink');
-    });
-
-    it('reports status for the target directory', () => {
-        const root = defaultSkillRoot({ home });
-        assert.equal(skillStatus({ root }).installed, 'no');
-        installSkill({ root });
-        const status = skillStatus({ root });
+        const status = skillStatus({ home });
         assert.equal(status.installed, 'yes');
         assert.equal(status.mode, 'copy');
+        assert.equal(status.source, 'coolxll/feedly-cli');
+        assert.equal(status.updatedAt, '2026-01-01T00:00:00.000Z');
+    });
+
+    it('reads lock entries defensively', () => {
+        assert.equal(readSkillLock({ home }), null);
+        mkdirSync(join(home, '.agents'), { recursive: true });
+        writeFileSync(join(home, '.agents', '.skill-lock.json'), '{not json');
+        assert.equal(readSkillLock({ home }), null);
+        assert.equal(existsSync(join(home, '.agents', '.skill-lock.json')), true);
+        assert.match(readFileSync(join(packagedSkillDir(), 'SKILL.md'), 'utf-8'), /feedly-cli/);
     });
 });

@@ -362,7 +362,7 @@ describe('feedly CLI end to end', () => {
         assert.match(unexpected.stderr, /Unexpected argument: extra/);
     });
 
-    it('prints and installs the bundled agent skill', async () => {
+    it('prints the bundled skill and delegates install to `skills`', async () => {
         const skillHome = mkdtempSync(join(tmpdir(), 'feedly-skill-e2e-'));
         try {
             // `feedly skill` prints SKILL.md so an agent can self-serve.
@@ -375,19 +375,30 @@ describe('feedly CLI end to end', () => {
             assert.match(listing.stdout, /SKILL\.md/);
             assert.match(listing.stdout, /references\/search-api\.md/);
 
-            const dry = await runCli(['skill', 'install', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
-            assert.equal(JSON.parse(dry.stdout)[0].status, 'would-install');
-            assert.equal(existsSync(join(skillHome, '.agents', 'skills', 'feedly-cli')), false);
+            const single = await runCli(['skill', 'read', 'references/search-api.md'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(single.code, 0);
+            assert.match(single.stdout, /search\/contents/);
 
-            const installed = await runCli(['skill', 'install', '--json'], { env: cliEnv({ HOME: skillHome }) });
-            assert.equal(JSON.parse(installed.stdout)[0].status, 'installed');
-            assert.equal(existsSync(join(skillHome, '.agents', 'skills', 'feedly-cli', 'SKILL.md')), true);
+            // Install is delegated to the `skills` CLI; assert the exact command.
+            const dry = await runCli(['skill', 'install', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(dry.code, 0);
+            const row = JSON.parse(dry.stdout)[0];
+            assert.equal(row.status, 'dry-run');
+            assert.match(row.command, /skills@latest add coolxll\/feedly-cli -s feedly-cli -a universal -g/);
+            assert.match(dry.stderr, /# would run: npx -y skills@latest add/);
+
+            const projectScoped = await runCli(['skill', 'install', '--project', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.doesNotMatch(JSON.parse(projectScoped.stdout)[0].command, / -g /);
+
+            const custom = await runCli(
+                ['skill', 'install', '--from', 'someone/other-repo', '--agent', 'claude-code', '--dry-run', '--json'],
+                { env: cliEnv({ HOME: skillHome }) },
+            );
+            assert.match(JSON.parse(custom.stdout)[0].command, /add someone\/other-repo -s feedly-cli -a claude-code/);
 
             const status = await runCli(['skill', 'status', '--json'], { env: cliEnv({ HOME: skillHome }) });
-            assert.match(JSON.parse(status.stdout)[0].status, /installed=yes/);
-
-            const again = await runCli(['skill', 'install', '--json'], { env: cliEnv({ HOME: skillHome }) });
-            assert.equal(JSON.parse(again.stdout)[0].status, 'exists');
+            assert.equal(status.code, 0);
+            assert.match(JSON.parse(status.stdout)[0].status, /installed=no/);
         } finally {
             rmSync(skillHome, { recursive: true, force: true });
         }

@@ -29,7 +29,19 @@ import {
 } from './commands.js';
 import { FORMATS, objectCursorText, renderObject, renderRows } from './output.js';
 import { FEEDLY_DEV_PAGE, openUrl, parseTokenInput, promptLine } from './login.js';
-import { AGENT_HINT, defaultSkillRoot, installSkill, listSkillFiles, packagedSkillDir, readSkillFile, skillStatus } from './skills.js';
+import {
+    AGENT_HINT,
+    DEFAULT_SKILL_AGENT,
+    listSkillFiles,
+    packageSource,
+    packagedSkillDir,
+    readSkillFile,
+    runSkillsAction,
+    skillStatus,
+    skillsAddArgs,
+    skillsRemoveArgs,
+    skillsUpdateArgs,
+} from './skills.js';
 import { VERSION } from './version.js';
 
 /* -------------------------------------------------------------------------- */
@@ -252,21 +264,25 @@ const COMMANDS = {
     },
 
     skill: {
-        summary: 'Print or install the bundled AI agent skill',
+        summary: 'Print the bundled AI skill, or install it via `npx skills`',
         positionals: [
-            { name: 'action', required: false, help: 'Print SKILL.md (default), or: list, read, install, status' },
+            { name: 'action', required: false, help: 'Print SKILL.md (default), or: list, read, install, update, remove, status' },
             { name: 'file', required: false, help: 'File to print with `read`, e.g. references/search-api.md' },
         ],
         options: {
-            force: { type: 'boolean', help: 'Overwrite an existing installation' },
-            link: { type: 'boolean', help: 'Symlink instead of copying (local development)' },
-            'dry-run': { type: 'boolean', help: 'Report what would happen without writing' },
-            root: { type: 'string', value: '<dir>', help: 'Skills directory (default ~/.agents/skills)' },
+            from: { type: 'string', value: '<owner/repo|url|path>', help: 'Skill source for install (default: this package repository)' },
+            agent: { type: 'string', value: '<agent>', help: 'Target agent for `skills` (default universal = ~/.agents/skills)' },
+            project: { type: 'boolean', help: 'Install project-locally instead of globally' },
+            'dry-run': { type: 'boolean', help: 'Show the `skills` command without running it' },
         },
         run: async (values, ctx) => {
             const action = String(values.action || '').trim().toLowerCase();
             const home = ctx.env.HOME || undefined;
-            const root = values.root || defaultSkillRoot(home ? { home } : {});
+            const options = {
+                source: values.from || packageSource(),
+                agent: values.agent || DEFAULT_SKILL_AGENT,
+                global: !values.project,
+            };
             const asJson = ctx.format === 'json' || ctx.format === 'jsonl';
 
             switch (action) {
@@ -280,31 +296,51 @@ const COMMANDS = {
                 case 'list': {
                     return listSkillFiles(packagedSkillDir()).map((file) => ({ file }));
                 }
-                case 'install': {
-                    const result = installSkill({
-                        root,
-                        force: Boolean(values.force),
-                        link: Boolean(values.link),
-                        dryRun: Boolean(values['dry-run']),
+                case 'install':
+                case 'add': {
+                    return runSkillSubcommand({
+                        ctx,
+                        values,
+                        args: skillsAddArgs(options),
+                        command: `npx ${skillsAddArgs(options).join(' ')}`,
+                        action: 'install',
                     });
-                    if (result.status === 'error') {
-                        throw new ConfigError(`Could not install the skill: ${result.error}`);
-                    }
-                    return [{ action: result.status, path: result.path, status: result.status }];
+                }
+                case 'update':
+                case 'upgrade': {
+                    return runSkillSubcommand({
+                        ctx,
+                        values,
+                        args: skillsUpdateArgs({ global: options.global }),
+                        command: `npx ${skillsUpdateArgs({ global: options.global }).join(' ')}`,
+                        action: 'update',
+                    });
+                }
+                case 'remove':
+                case 'uninstall': {
+                    return runSkillSubcommand({
+                        ctx,
+                        values,
+                        args: skillsRemoveArgs({ global: options.global }),
+                        command: `npx ${skillsRemoveArgs({ global: options.global }).join(' ')}`,
+                        action: 'remove',
+                    });
                 }
                 case 'status':
                 case 'path': {
-                    const status = skillStatus({ root });
+                    const status = skillStatus(home ? { home } : {});
                     return [{
                         action: 'status',
                         path: status.path,
                         status: `installed=${status.installed}${status.mode ? ` (${status.mode})` : ''}`,
+                        source: status.source,
+                        updated: status.updatedAt,
                     }];
                 }
                 default:
                     throw new ArgumentError(
                         `Unknown skill action: ${action}`,
-                        'Use one of: (none), read, list, install, status.',
+                        'Use one of: (none), read, list, install, update, remove, status.',
                     );
             }
         },
@@ -536,6 +572,27 @@ export function renderHelp(command = '') {
         AGENT_HINT,
         '',
     ].join('\n');
+}
+
+/**
+ * Delegate install/update/remove to the `skills` CLI, keeping `--dry-run` and
+ * JSON output consistent with the rest of this CLI.
+ */
+async function runSkillSubcommand({ ctx, values, args, command, action }) {
+    if (values['dry-run']) {
+        ctx.stderr.write(`# would run: ${command}\n`);
+        return [{ action, path: '', status: 'dry-run', command }];
+    }
+
+    const payload = await runSkillsAction({ args, env: ctx.env });
+    const rows = Array.isArray(payload) ? payload : payload ? [payload] : [];
+    if (rows.length === 0) return [{ action, path: '', status: 'ok', command }];
+    return rows.map((row) => ({
+        action,
+        path: row?.path || '',
+        status: row?.status || 'ok',
+        source: row?.source || '',
+    }));
 }
 
 /* -------------------------------------------------------------------------- */

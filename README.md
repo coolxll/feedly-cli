@@ -36,7 +36,7 @@ Then sign in (browser, device flow) and make the CLI discoverable to agents:
 
 ```bash
 feedly login
-feedly skill install     # -> ~/.agents/skills/feedly-cli
+feedly skill install     # -> ~/.agents/skills/feedly-cli (via npx skills)
 ```
 
 ## Credentials
@@ -143,7 +143,7 @@ feedly login --refresh-token "$(jq -r .refresh_token ~/.opencli/feedly.json)"
 | `feedly subscriptions` | List feed subscriptions with unread counts |
 | `feedly counts` | List raw unread marker counts |
 | `feedly mark-read` | Mark entries read (requires `--confirm MARK_READ`) |
-| `feedly skill` | Print or install the bundled AI agent skill |
+| `feedly skill` | Print the bundled AI skill, or install it via `npx skills` |
 | `feedly login` | Sign in via browser (device flow) or store an existing token |
 | `feedly config` | Show config candidates and credential status |
 
@@ -264,8 +264,10 @@ to be installed separately for the agent to learn the tool.
 | `feedly skill` | Print `SKILL.md` — the full agent instructions |
 | `feedly skill list` | List bundled skill files |
 | `feedly skill read <file>` | Print one file, e.g. `references/search-api.md` |
-| `feedly skill install` | Install into `~/.agents/skills/feedly-cli` |
-| `feedly skill status` | Check whether it is installed |
+| `feedly skill install` | Install via `npx skills` into `~/.agents/skills` |
+| `feedly skill update` | Update the installed skill from the repository |
+| `feedly skill remove` | Uninstall it |
+| `feedly skill status` | Show install location, source, and last update |
 
 So an agent can bootstrap itself with a single command:
 
@@ -277,21 +279,39 @@ feedly skill install         # make them discoverable in future sessions
 `--help` also advertises this, and auth/config failures print
 `hint: run \`feedly skill\` for agent usage`.
 
-### Where the skill is installed
+### Installation is delegated to `npx skills`
 
-`feedly skill install` writes to **`~/.agents/skills/feedly-cli`** — the
-[Agent Skills](https://agentskills.io/specification) standard global directory.
+Installing is **not** reimplemented here. `feedly skill install` shells out to
+[`skills`](https://github.com/vercel-labs/skills) (Vercel Labs, "the open agent
+skills ecosystem"), which already knows every harness's skill directory, keeps
+a lock file, and supports updates:
 
-- **pi** reads `~/.agents/skills/` natively — nothing else to do.
-- Other harnesses can point at the same directory from their own settings, e.g.
-  pi: `{"skills": ["~/.agents/skills"]}`, or Claude Code / Codex can be pointed
-  at it the same way.
+```bash
+# what `feedly skill install` runs
+npx -y skills@latest add coolxll/feedly-cli -s feedly-cli -a universal -g -y --json
+```
 
-Useful flags: `--force` (overwrite), `--link` (symlink for local development),
-`--dry-run`, `--root <dir>` (install somewhere else).
+`-a universal` targets the [Agent Skills](https://agentskills.io/specification)
+standard directory **`~/.agents/skills`** only — no scattering symlinks across
+other harness folders. `pi` reads that directory natively. `--project` drops
+`-g` for project-local installs.
 
-The CLI has **no dependency on any agent harness**: the skill is plain Markdown,
-and installing it is a file copy.
+You can also skip this CLI entirely and install the skill the standard way:
+
+```bash
+npx skills add coolxll/feedly-cli -s feedly-cli -a universal -g
+npx skills update feedly-cli -g      # uses ~/.agents/.skill-lock.json
+```
+
+Because the `skills` lock file records the source and content hash, updates
+work without re-specifying the repository.
+
+Flags: `--from <owner/repo|url|path>` (default: this package's repository),
+`--agent <agent>` (default `universal`), `--project`, `--dry-run` (prints the
+underlying command without running it).
+
+The CLI has **no dependency on any agent harness**: reading the skill is a file
+read, and installing is a subprocess call to a tool you already have via `npx`.
 
 ### Package layout
 
