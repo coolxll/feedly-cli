@@ -1,6 +1,6 @@
 {
   "name": "@coolxll/feedly-cli",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Standalone Feedly CLI: profile, unread streams, search, subscriptions, and read markers. No OpenCLI required.",
   "license": "MIT",
   "type": "module",
@@ -25,6 +25,7 @@
     "skills/",
     "docs/",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
