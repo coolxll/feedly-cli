@@ -430,11 +430,14 @@ describe('feedly CLI end to end', () => {
             assert.match(single.stdout, /search\/contents/);
 
             // Install is delegated to the `skills` CLI; assert the exact command.
+            // Default source is the BUNDLED skill so it always matches this
+            // CLI version (regression: it used to fetch the GitHub repo).
             const dry = await runCli(['skill', 'install', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
             assert.equal(dry.code, 0);
             const row = JSON.parse(dry.stdout)[0];
             assert.equal(row.status, 'dry-run');
-            assert.match(row.command, /skills@latest add coolxll\/feedly-cli -s feedly-cli -a universal -g/);
+            assert.match(row.command, /skills@latest add .*skills\/feedly-cli -s feedly-cli -a universal -g/);
+            assert.doesNotMatch(row.command, /add coolxll\/feedly-cli/);
             assert.match(dry.stderr, /# would run: npx -y skills@latest add/);
 
             const projectScoped = await runCli(['skill', 'install', '--project', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
@@ -445,6 +448,15 @@ describe('feedly CLI end to end', () => {
                 { env: cliEnv({ HOME: skillHome }) },
             );
             assert.match(JSON.parse(custom.stdout)[0].command, /add someone\/other-repo -s feedly-cli -a claude-code/);
+
+            // `update` re-syncs from the bundled skill, not the GitHub repo.
+            const update = await runCli(['skill', 'update', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(update.code, 0);
+            assert.match(JSON.parse(update.stdout)[0].command, /skills@latest add .*skills\/feedly-cli/);
+
+            // `update upstream` follows the lock origin instead.
+            const upstream = await runCli(['skill', 'update', 'upstream', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.match(JSON.parse(upstream.stdout)[0].command, /skills@latest update feedly-cli/);
 
             const status = await runCli(['skill', 'status', '--json'], { env: cliEnv({ HOME: skillHome }) });
             assert.equal(status.code, 0);

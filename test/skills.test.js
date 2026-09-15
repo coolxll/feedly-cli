@@ -8,14 +8,16 @@ import { ArgumentError, ConfigError } from '../src/errors.js';
 import {
     DEFAULT_SKILL_AGENT,
     defaultSkillRoot,
+    defaultSkillSource,
     defaultSkillTarget,
+    hashSkillDir,
     listSkillFiles,
-    packageSource,
     packagedSkillDir,
     parseSkillsJson,
     readSkillFile,
     readSkillLock,
     runSkillsAction,
+    skillDrift,
     skillStatus,
     skillsAddArgs,
     skillsRemoveArgs,
@@ -52,10 +54,20 @@ describe('bundled skill files', () => {
 });
 
 describe('skills CLI delegation', () => {
-    it('derives the source from the package repository', () => {
-        assert.equal(packageSource({ repository: { url: 'git+https://github.com/coolxll/feedly-cli.git' } }), 'coolxll/feedly-cli');
-        assert.equal(packageSource({ repository: 'https://github.com/foo/bar' }), 'foo/bar');
-        assert.equal(packageSource({}), '');
+    it('defaults the install source to the bundled skill, not the repo', () => {
+        // Regression: using the package.json repository made `skill install`
+        // fetch GitHub, which can lag behind the installed npm version.
+        assert.equal(defaultSkillSource(), packagedSkillDir());
+        assert.equal(skillsAddArgs()[3], packagedSkillDir());
+        assert.notEqual(skillsAddArgs()[3], 'coolxll/feedly-cli');
+    });
+
+    it('throws when the bundled skill directory is missing', () => {
+        assert.throws(() => defaultSkillSource({ source: '/nope/skill', exists: () => false }), ConfigError);
+    });
+
+    it('lets --from override the default source', () => {
+        assert.equal(skillsAddArgs({ source: 'coolxll/feedly-cli' })[3], 'coolxll/feedly-cli');
     });
 
     it('builds the documented `skills add` invocation', () => {
@@ -174,5 +186,55 @@ describe('skill status', () => {
         assert.equal(readSkillLock({ home }), null);
         assert.equal(existsSync(join(home, '.agents', '.skill-lock.json')), true);
         assert.match(readFileSync(join(packagedSkillDir(), 'SKILL.md'), 'utf-8'), /feedly-cli/);
+    });
+
+    describe('drift detection', () => {
+        const installBundle = (target) => {
+            mkdirSync(target, { recursive: true });
+            cpSync(packagedSkillDir(), target, { recursive: true });
+        };
+
+        it('hashes directories order-independently', () => {
+            const a = join(home, 'a');
+            const b = join(home, 'b');
+            mkdirSync(a, { recursive: true });
+            mkdirSync(b, { recursive: true });
+            writeFileSync(join(a, 'SKILL.md'), 'one');
+            writeFileSync(join(a, 'ref.md'), 'two');
+            writeFileSync(join(b, 'ref.md'), 'two');
+            writeFileSync(join(b, 'SKILL.md'), 'one');
+            assert.equal(hashSkillDir(a), hashSkillDir(b));
+            writeFileSync(join(b, 'ref.md'), 'changed');
+            assert.notEqual(hashSkillDir(a), hashSkillDir(b));
+        });
+
+        it('reports in-sync when the copy matches the bundled skill', () => {
+            const target = defaultSkillTarget({ home });
+            installBundle(target);
+            assert.equal(skillDrift({ target }).state, 'in-sync');
+            assert.equal(skillStatus({ home }).sync, 'in-sync');
+        });
+
+        it('reports drifted after the CLI (bundled skill) changes', () => {
+            const target = defaultSkillTarget({ home });
+            installBundle(target);
+
+            // Simulate an upgraded CLI whose bundled skill moved ahead.
+            const bundle = join(home, 'bundle');
+            installBundle(bundle);
+            writeFileSync(join(bundle, 'SKILL.md'), 'newer instructions\n');
+
+            assert.equal(skillDrift({ target, source: bundle }).state, 'drifted');
+            assert.equal(skillStatus({ home, source: bundle }).sync, 'drifted');
+        });
+
+        it('reports not-installed and unknown states', () => {
+            const target = defaultSkillTarget({ home });
+            assert.equal(skillDrift({ target }).state, 'not-installed');
+            assert.equal(skillStatus({ home }).sync, 'not-installed');
+
+            installBundle(target);
+            assert.equal(skillDrift({ target, source: join(home, 'missing') }).state, 'unknown');
+        });
     });
 });

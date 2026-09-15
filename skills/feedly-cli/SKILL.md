@@ -53,6 +53,20 @@ feedly unread --limit 5 --columns id,title,content --wide
 `content` is not a default table column; request it explicitly. Use
 `--body-limit <n>` to cap payload size and `--no-body` to omit bodies entirely.
 
+## Keeping this skill current
+
+The skill you are reading ships inside the `feedly` CLI package. If the CLI is
+upgraded, refresh the installed copy so it matches:
+
+```bash
+feedly skill status      # reports in-sync or drifted
+feedly skill update      # re-install from the bundled skill
+```
+
+`feedly skill update` matches the installed CLI version; `feedly skill update
+upstream` follows the GitHub repo recorded in `~/.agents/.skill-lock.json`
+instead (which can be ahead of or behind your CLI).
+
 ## Search contents
 
 ```bash

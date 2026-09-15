@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ArgumentError, AuthError, ConfigError, FeedlyError } from './errors.js';
 import {
@@ -33,11 +34,12 @@ import { FEEDLY_DEV_PAGE, openUrl, parseTokenInput, promptLine } from './login.j
 import {
     AGENT_HINT,
     DEFAULT_SKILL_AGENT,
+    defaultSkillSource,
     listSkillFiles,
-    packageSource,
     packagedSkillDir,
     readSkillFile,
     runSkillsAction,
+    skillSourceRecordPath,
     skillStatus,
     skillsAddArgs,
     skillsRemoveArgs,
@@ -276,7 +278,7 @@ const COMMANDS = {
             { name: 'file', required: false, help: 'File to print with `read`, e.g. references/search-api.md' },
         ],
         options: {
-            from: { type: 'string', value: '<owner/repo|url|path>', help: 'Skill source for install (default: this package repository)' },
+            from: { type: 'string', value: '<owner/repo|url|path>', help: 'Install from this source instead of the bundled skill' },
             agent: { type: 'string', value: '<agent>', help: 'Target agent for `skills` (default universal = ~/.agents/skills)' },
             project: { type: 'boolean', help: 'Install project-locally instead of globally' },
             'dry-run': { type: 'boolean', help: 'Show the `skills` command without running it' },
@@ -284,11 +286,11 @@ const COMMANDS = {
         run: async (values, ctx) => {
             const action = String(values.action || '').trim().toLowerCase();
             const home = ctx.env.HOME || undefined;
-            const options = {
-                source: values.from || packageSource(),
-                agent: values.agent || DEFAULT_SKILL_AGENT,
-                global: !values.project,
-            };
+            const global = !values.project;
+            // `--from` is an explicit opt-in to track a repo/URL/path; otherwise
+            // install the skill bundled with this exact CLI version.
+            const source = values.from || defaultSkillSource();
+            const options = { source, agent: values.agent || DEFAULT_SKILL_AGENT, global };
             const asJson = ctx.format === 'json' || ctx.format === 'jsonl';
 
             switch (action) {
@@ -310,16 +312,34 @@ const COMMANDS = {
                         args: skillsAddArgs(options),
                         command: `npx ${skillsAddArgs(options).join(' ')}`,
                         action: 'install',
+                        record: { source, sourceType: values.from ? 'external' : 'bundled', global },
                     });
                 }
                 case 'update':
                 case 'upgrade': {
+                    // Re-sync from the bundled skill so the installed copy matches
+                    // this CLI version. `--from` tracks the given source, and
+                    // `update upstream` follows the lock origin (GitHub) instead.
+                    const wantsUpstream = String(values.file || '').trim().toLowerCase() === 'upstream';
+                    if (wantsUpstream) {
+                        return runSkillSubcommand({
+                            ctx,
+                            values,
+                            args: skillsUpdateArgs({ global }),
+                            command: `npx ${skillsUpdateArgs({ global }).join(' ')}`,
+                            action: 'update',
+                        });
+                    }
+
+                    const source = values.from || defaultSkillSource();
+                    const args = skillsAddArgs({ source, agent: options.agent, global });
                     return runSkillSubcommand({
                         ctx,
                         values,
-                        args: skillsUpdateArgs({ global: options.global }),
-                        command: `npx ${skillsUpdateArgs({ global: options.global }).join(' ')}`,
+                        args,
+                        command: `npx ${args.join(' ')}`,
                         action: 'update',
+                        record: { source, sourceType: values.from ? 'external' : 'bundled', global },
                     });
                 }
                 case 'remove':
@@ -327,8 +347,8 @@ const COMMANDS = {
                     return runSkillSubcommand({
                         ctx,
                         values,
-                        args: skillsRemoveArgs({ global: options.global }),
-                        command: `npx ${skillsRemoveArgs({ global: options.global }).join(' ')}`,
+                        args: skillsRemoveArgs({ global }),
+                        command: `npx ${skillsRemoveArgs({ global }).join(' ')}`,
                         action: 'remove',
                     });
                 }
@@ -339,6 +359,8 @@ const COMMANDS = {
                         action: 'status',
                         path: status.path,
                         status: `installed=${status.installed}${status.mode ? ` (${status.mode})` : ''}`,
+                        sync: status.installed === 'no' ? '' : status.sync,
+                        version: status.version,
                         source: status.source,
                         updated: status.updatedAt,
                     }];
@@ -346,7 +368,7 @@ const COMMANDS = {
                 default:
                     throw new ArgumentError(
                         `Unknown skill action: ${action}`,
-                        'Use one of: (none), read, list, install, update, remove, status.',
+                        'Use one of: (none), read, list, install, update, upstream, remove, status.',
                     );
             }
         },
@@ -599,21 +621,39 @@ export function renderHelp(command = '') {
  * Delegate install/update/remove to the `skills` CLI, keeping `--dry-run` and
  * JSON output consistent with the rest of this CLI.
  */
-async function runSkillSubcommand({ ctx, values, args, command, action }) {
+async function runSkillSubcommand({ ctx, values, args, command, action, record }) {
     if (values['dry-run']) {
         ctx.stderr.write(`# would run: ${command}\n`);
         return [{ action, path: '', status: 'dry-run', command }];
     }
 
     const payload = await runSkillsAction({ args, env: ctx.env });
+    // Remember what we installed from so `status` can report the origin, and so
+    // a bundled install is distinguishable from a GitHub/URL one.
+    if (record && action !== 'remove') {
+        writeSourceRecord({ ...record, updatedAt: new Date().toISOString() }, ctx);
+    }
+
     const rows = Array.isArray(payload) ? payload : payload ? [payload] : [];
     if (rows.length === 0) return [{ action, path: '', status: 'ok', command }];
     return rows.map((row) => ({
         action,
         path: row?.path || '',
         status: row?.status || 'ok',
-        source: row?.source || '',
+        source: record?.sourceType === 'bundled' ? 'bundled' : row?.source || '',
     }));
+}
+
+/** Best-effort source bookkeeping; never fails the command. */
+function writeSourceRecord(record, ctx) {
+    try {
+        const home = ctx.env.HOME || undefined;
+        const path = skillSourceRecordPath(home ? { home } : {});
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
+    } catch {
+        // ignore: this is advisory metadata only
+    }
 }
 
 /* -------------------------------------------------------------------------- */

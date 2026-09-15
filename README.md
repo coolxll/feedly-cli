@@ -296,9 +296,10 @@ to be installed separately for the agent to learn the tool.
 | `feedly skill list` | List bundled skill files |
 | `feedly skill read <file>` | Print one file, e.g. `references/search-api.md` |
 | `feedly skill install` | Install via `npx skills` into `~/.agents/skills` |
-| `feedly skill update` | Update the installed skill from the repository |
+| `feedly skill update` | Re-sync the installed skill with this CLI version |
+| `feedly skill update upstream` | Track the GitHub repo recorded in the lock file |
 | `feedly skill remove` | Uninstall it |
-| `feedly skill status` | Show install location, source, and last update |
+| `feedly skill status` | Show location, source, and whether it is in sync |
 
 So an agent can bootstrap itself with a single command:
 
@@ -315,11 +316,23 @@ feedly skill install         # make them discoverable in future sessions
 Installing is **not** reimplemented here. `feedly skill install` shells out to
 [`skills`](https://github.com/vercel-labs/skills) (Vercel Labs, "the open agent
 skills ecosystem"), which already knows every harness's skill directory, keeps
-a lock file, and supports updates:
+a lock file, and supports updates.
+
+The default source is the skill **bundled in this package**, so the installed
+skill always matches the CLI version you are running:
 
 ```bash
 # what `feedly skill install` runs
-npx -y skills@latest add coolxll/feedly-cli -s feedly-cli -a universal -g -y --json
+npx -y skills@latest add <node_modules>/@coolxll/feedly-cli/skills/feedly-cli \
+  -s feedly-cli -a universal -g -y --json
+```
+
+Use `--from <owner/repo|url|path>` to install from somewhere else instead
+(upstream GitHub, a fork, or a local checkout):
+
+```bash
+feedly skill install --from coolxll/feedly-cli   # track the repo
+feedly skill install --from ./skills/feedly-cli  # local development
 ```
 
 `-a universal` targets the [Agent Skills](https://agentskills.io/specification)
@@ -327,19 +340,35 @@ standard directory **`~/.agents/skills`** only — no scattering symlinks across
 other harness folders. `pi` reads that directory natively. `--project` drops
 `-g` for project-local installs.
 
-You can also skip this CLI entirely and install the skill the standard way:
+### Keeping the skill in sync
+
+Because a bundled source is a local directory, `npx skills update` cannot follow
+it (no lock entry is written for local installs). So:
+
+- `feedly skill update` re-installs from the **bundled** skill — i.e. "bring the
+  installed skill up to date with the CLI version you have".
+- `feedly skill update upstream` runs `npx skills update` to follow the GitHub
+  origin recorded in `~/.agents/.skill-lock.json`, which may be **ahead of or
+  behind** the CLI version you installed.
+- `feedly skill status` reports `in-sync` or `drifted` by hashing the installed
+  directory against the bundled one. After upgrading the CLI, run it to see
+  whether a re-install is needed:
+
+```bash
+$ feedly skill status
+ACTION  PATH                            STATUS                SYNC      VERSION  SOURCE
+status  ~/.agents/skills/feedly-cli     installed=yes (copy)  drifted   1.4.0    bundled
+```
+
+You can also install the skill without this CLI, straight from the repo:
 
 ```bash
 npx skills add coolxll/feedly-cli -s feedly-cli -a universal -g
 npx skills update feedly-cli -g      # uses ~/.agents/.skill-lock.json
 ```
 
-Because the `skills` lock file records the source and content hash, updates
-work without re-specifying the repository.
-
-Flags: `--from <owner/repo|url|path>` (default: this package's repository),
-`--agent <agent>` (default `universal`), `--project`, `--dry-run` (prints the
-underlying command without running it).
+Flags: `--from <owner/repo|url|path>`, `--agent <agent>` (default `universal`),
+`--project`, `--dry-run` (prints the underlying command without running it).
 
 The CLI has **no dependency on any agent harness**: reading the skill is a file
 read, and installing is a subprocess call to a tool you already have via `npx`.
@@ -373,6 +402,23 @@ npm run test:watch
 Tests cover config discovery, token refresh/rotation, 401 retry, pagination,
 search request shape, output formats, and a full CLI run against a local
 mock Feedly server.
+
+### Versioning
+
+This project follows [Semantic Versioning](https://semver.org/). The version is
+derived from the commits since the last tag, using
+[Conventional Commits](https://www.conventionalcommits.org/) types:
+
+| Change | Bump | Example |
+| --- | --- | --- |
+| Breaking change | `major` | command/flag removed or output contract changed |
+| `feat:` — new command, flag, or field | `minor` | added `--body-limit`, added `content` |
+| `fix:`, `perf:`, `refactor:`, `chore:`, `docs:`, `test:` | `patch` | stopped truncating bodies at 240 chars |
+
+Patch releases are the default; do not bump minor for bug fixes. Releases are
+tagged `vX.Y.Z`, and `git tag` is the source of truth for "what shipped".
+When a change alters existing output or removes a flag, call it out under
+**Breaking** in the commit body.
 
 ## Notes
 

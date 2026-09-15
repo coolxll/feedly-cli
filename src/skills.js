@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, normalize, relative, sep } from 'node:path';
@@ -30,21 +31,29 @@ function readPackageJson() {
         return {};
     }
 }
-
 /**
- * Default source for `skills add`, derived from the package's repository
- * field and normalized to the `owner/name` shorthand the skills CLI prefers.
+ * Default source for `skills add` is the skill **bundled in this package**, not
+ * the GitHub repository. The npm version and its bundled skill then always
+ * travel together, so `feedly skill install` cannot pick up a skill that
+ * predates the installed CLI (e.g. when publishing before pushing, or when
+ * installing a tag/branch). Pass `--from <owner/repo>` to track the repo
+ * instead.
  */
-export function packageSource(pkg = readPackageJson()) {
-    const url = String(pkg?.repository?.url || pkg?.repository || '');
-    const match = url.match(/github\.com[/:]([^/]+)\/([^/#]+?)(?:\.git)?\/?$/i);
-    if (match) return `${match[1]}/${match[2]}`;
-    return '';
+export function defaultSkillSource({ source = packagedSkillDir(), exists = existsSync } = {}) {
+    if (!exists(source)) {
+        throw new ConfigError(`Bundled skill directory is missing: ${source}`);
+    }
+    return source;
 }
 
-/** `npx -y skills@latest add <source> ... --json` */
+/**
+ * `npx -y skills@latest add <source> ... --json`
+ *
+ * `source` defaults to the bundled skill directory; `--from` overrides it with
+ * an `owner/repo`, URL, or path.
+ */
 export function skillsAddArgs({
-    source,
+    source = defaultSkillSource(),
     skill = SKILL_NAME,
     agent = DEFAULT_SKILL_AGENT,
     global = true,
@@ -64,6 +73,12 @@ export function skillsAddArgs({
     ];
 }
 
+/**
+ * Upstream update: follows the origin recorded in `~/.agents/.skill-lock.json`
+ * (normally the GitHub repo). Only meaningful for GitHub-sourced installs —
+ * local-path installs write no lock entry and cannot be updated this way, which
+ * is why `feedly skill update` re-syncs from the bundled skill by default.
+ */
 export function skillsUpdateArgs({ global = true, skill = SKILL_NAME } = {}) {
     return ['-y', SKILLS_PACKAGE, 'update', skill, ...(global ? ['-g'] : []), '-y'];
 }
@@ -221,12 +236,76 @@ export function readSkillFile(relativePath = 'SKILL.md', dir = packagedSkillDir(
 }
 
 /** Inspect the standard install location plus any lock metadata. */
+/** Recorded source for the last install, so `status` can name it. */
+export function skillSourceRecordPath({ home = homedir() } = {}) {
+    return join(home, '.agents', '.feedly-skill-source.json');
+}
+
+function readSourceRecord({ home = homedir(), readFile = readFileSync } = {}) {
+    try {
+        return JSON.parse(readFile(skillSourceRecordPath({ home }), 'utf-8'));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Stable content hash of a skill directory.
+ *
+ * Hashes relative paths and file bytes, so it is order-independent and matches
+ * the spirit of the `skillFolderHash` recorded by the `skills` CLI lock file.
+ */
+export function hashSkillDir(dir, { readdir = readdirSync, readFile = readFileSync, stat = statSync } = {}) {
+    if (!existsSync(dir)) return '';
+    const files = [];
+    const walk = (current) => {
+        for (const entry of readdir(current, { withFileTypes: true })) {
+            const full = join(current, entry.name);
+            if (entry.isDirectory()) walk(full);
+            else if (entry.isFile()) files.push(full);
+        }
+    };
+    walk(dir);
+    files.sort();
+
+    const hash = createHash('sha256');
+    for (const file of files) {
+        if (!stat(file).isFile()) continue;
+        hash.update(relative(dir, file).split(sep).join('/'));
+        hash.update('\0');
+        hash.update(readFile(file));
+        hash.update('\0');
+    }
+    return hash.digest('hex');
+}
+
+/**
+ * Compare the installed skill against the copy bundled with this CLI version.
+ * `in-sync` means the installed skill matches the running CLI.
+ */
+export function skillDrift({
+    target,
+    source = packagedSkillDir(),
+    hash = hashSkillDir,
+} = {}) {
+    if (!existsSync(join(target, 'SKILL.md'))) return { state: 'not-installed', installedHash: '', bundledHash: '' };
+    const installedHash = hash(target);
+    const bundledHash = existsSync(source) ? hash(source) : '';
+    if (!bundledHash) return { state: 'unknown', installedHash, bundledHash: '' };
+    return {
+        state: installedHash === bundledHash ? 'in-sync' : 'drifted',
+        installedHash,
+        bundledHash,
+    };
+}
+
 export function skillStatus({
     home = homedir(),
     root = defaultSkillRoot({ home }),
     target = join(root, SKILL_NAME),
     source = packagedSkillDir(),
     readFile = readFileSync,
+    hash = hashSkillDir,
 } = {}) {
     const installed = existsSync(join(target, 'SKILL.md'));
     let mode = '';
@@ -238,14 +317,21 @@ export function skillStatus({
         }
     }
     const lock = installed ? readSkillLock({ home, readFile }) : null;
+    const record = readSourceRecord({ home, readFile });
+    const drift = installed ? skillDrift({ target, source, hash }) : { state: 'not-installed', installedHash: '', bundledHash: '' };
+
     return {
         root,
         path: target,
         installed: installed ? 'yes' : 'no',
         mode,
-        source: lock?.source || '',
-        updatedAt: lock?.updatedAt || '',
+        // Lock origin when installed from GitHub; local record otherwise.
+        source: lock?.source || record?.source || '',
+        sourceType: lock?.sourceType || record?.sourceType || '',
+        updatedAt: lock?.updatedAt || record?.updatedAt || '',
         bundled: source,
+        sync: drift.state,
+        version: readPackageJson().version || '',
     };
 }
 
