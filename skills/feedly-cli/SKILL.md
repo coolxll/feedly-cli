@@ -26,6 +26,11 @@ waits for browser approval. Use `feedly login --print-url` in headless
 sessions to hand the URL to the user. `feedly config` reports what is
 discovered.
 
+A Feedly refresh token is bound to the OAuth client that minted it. `feedly
+login` records the client id (`feedlydev` by default) so refreshes succeed on
+the first try; if refresh ever fails with `invalid refresh_token`, re-run
+`feedly login` instead of editing tokens by hand.
+
 ## Choose a command
 
 - Verify credentials or obtain the account id: `feedly profile --json`

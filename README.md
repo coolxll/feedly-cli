@@ -6,6 +6,7 @@ No browser, no OpenCLI, no runtime dependencies. Extracted from the `opencli` Fe
 - Zero dependencies, ESM, Node.js >= 20 (uses the built-in `fetch`)
 - Browser sign-in via Feedly's OAuth device flow — no token copy-pasting
 - Token refresh with the `feedly` / `feedlydev` public client ids, or a custom client
+  (refresh tokens are bound to the client that minted them; the CLI records and reuses it)
 - Table, JSON, JSONL, TSV, and CSV output for pipelines
 - Reads your existing `~/.opencli/feedly.json` automatically (easy migration)
 - Typed errors with stable exit codes
@@ -78,8 +79,21 @@ Useful variants:
 
 > Feedly does not allow loopback redirect URIs (`http://127.0.0.1:...`) for the
 > public clients, so a local callback server is not possible; the device flow is
-> used instead. It relies on Feedly's public developer client
-> (`feedlydev`), the same client the official developer-token page uses.
+> used instead. It relies on Feedly's public developer client (`feedlydev`), the
+> same client id used by the official developer-token page. That grant requires
+> a `client_secret`, which the public client has; `client_id=feedly` cannot be
+> used because no secret for it is available. If the secret is ever rotated,
+> fall back to `feedly login --paste`, which uses the official PKCE page and
+> needs no secret.
+
+### How tokens are bound
+
+A Feedly **refresh token only works with the client that created it** — a token
+minted by `feedly` is rejected by `feedlydev` and vice versa. `feedly login`
+records the client id it used, so later refreshes go straight to the right
+client instead of failing over. `client_secret` is ignored when refreshing (it
+only matters for the device and auth-code flows), and a manually pasted token is
+tried against `feedly` then `feedlydev`.
 
 ### Option B: paste an existing token
 

@@ -28,10 +28,20 @@ Feedly supports RFC 8628 device authorization:
    returning `authorization_pending` (also handle `slow_down`, `access_denied`,
    and expiry).
 
-Feedly's public developer client is `client_id=feedlydev` with
-`client_secret=feedlydev`; it is the same client used by the official
-`https://feedly.com/v3/auth/dev` token page. Both values are required — omitting
-`client_secret` yields `missing client_secret`.
+Feedly's public developer client is `client_id=feedlydev`; the device grant
+also requires `client_secret=feedlydev`. `client_secret` is validated here
+(unlike the refresh grant): omitting it yields `missing client_secret` and a
+wrong value yields `bad client_secret`.
+
+`client_id=feedly` cannot be used for login: the device grant demands a secret,
+and none for `feedly` is publicly available — both plausible guesses are rejected
+with `bad client_secret`. `feedlydev` is also what Feedly's own
+`https://feedly.com/v3/auth/dev` page uses (its `clientId` constant), though that
+page does not publish the secret.
+
+Because a public secret is involved, `--paste` exists as an independent path: it
+uses the official PKCE page, which as a public client needs **no** secret, at the
+cost of copying the token by hand.
 
 Loopback redirect URIs are **not** allow-listed, which is why the device flow is
 used instead of a local callback server:
@@ -50,17 +60,30 @@ used instead of a local callback server:
 ```
 grant_type=refresh_token
 refresh_token=<token>
-client_id=feedly          # falls back to feedlydev
-client_secret=<optional>
+client_id=<the client that minted the token>
 ```
 
-The two public client ids work without a secret for personal use. A
-configured `client_id` (and optional `client_secret`) takes precedence, then
-`feedly`, then `feedlydev`. Responses may rotate the refresh token — the CLI
-persists the new value.
+**A refresh token is bound to the client that created it.** Verified by swapping
+clients on the same token:
 
-`expires_in` is seconds. `expires_at` in config files is accepted in both
-seconds and milliseconds and normalized to milliseconds.
+| `client_id` sent | Result |
+| --- | --- |
+| the minting client | `200` with a new access token |
+| the other public client | `400 invalid refresh_token` |
+| an unknown client | `400 unknown client_id` |
+
+So a token minted through `feedly` is rejected by `feedlydev`, and the reverse.
+The CLI records `client_id` in the config (written on login and refreshed on a
+successful refresh) and tries that value first, falling back to `feedly` then
+`feedlydev` for configs that predate the field.
+
+`client_secret` is **ignored** on this grant — a wrong value still succeeds, and
+omitting it is fine. It is only meaningful for the device and auth-code flows.
+
+`expires_in` is seconds (observed: `604800`, i.e. 7 days). `expires_at` in config
+files is accepted in both seconds and milliseconds and normalized to
+milliseconds. Refresh responses have been observed to return the same refresh
+token unchanged, but the CLI still persists a rotated value if one is sent.
 
 ## Endpoints
 

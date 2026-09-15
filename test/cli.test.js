@@ -325,6 +325,8 @@ describe('feedly CLI end to end', () => {
         const config = JSON.parse(readFileSync(loginPath, 'utf-8'));
         assert.equal(config.access_token, 'device-token');
         assert.equal(config.refresh_token, 'device-refresh');
+        // The minting client is recorded so refresh does not try the wrong one.
+        assert.equal(config.client_id, 'feedlydev');
         assert.equal(deviceRequests.length, 1);
         assert.match(deviceRequests[0], /client_id=feedlydev/);
         // Pending then approved: the CLI keeps polling until tokens arrive.

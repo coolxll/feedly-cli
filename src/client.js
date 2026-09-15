@@ -214,23 +214,28 @@ export async function refreshAccessToken(config, { fetchImpl = fetch, writeFile 
         );
     }
 
+    // A refresh token is bound to the client that minted it: a token from
+    // `feedly` is rejected with `invalid refresh_token` by `feedlydev` and vice
+    // versa. `client_secret` is ignored on this grant, so it is not sent.
     const failures = [];
     for (const clientId of refreshClientIds(config)) {
         const { ok, status, data } = await formPost(`${resolveApiBases(env).apiBase}/auth/token`, {
             grant_type: 'refresh_token',
             refresh_token: config.refreshToken,
             client_id: clientId,
-            ...(config.clientSecret ? { client_secret: config.clientSecret } : {}),
         }, { fetchImpl, timeout: DEFAULT_TIMEOUT_MS, env });
         if (ok && isRecord(data) && typeof data.access_token === 'string' && data.access_token.trim()) {
             const expiresIn = Math.max(1, Number(data.expires_in || 3600)) * 1000;
             return saveConfig(config, {
                 access_token: data.access_token,
                 expires_at: Date.now() + expiresIn,
+                // Remember which client worked so later refreshes hit it first.
+                client_id: clientId,
                 ...(data.refresh_token ? { refresh_token: data.refresh_token } : {}),
                 ...(config.raw.accessToken !== undefined ? { accessToken: data.access_token } : {}),
                 ...(config.raw.expiresAt !== undefined ? { expiresAt: Date.now() + expiresIn } : {}),
                 ...(data.refresh_token && config.raw.refreshToken !== undefined ? { refreshToken: data.refresh_token } : {}),
+                ...(config.raw.clientId !== undefined ? { clientId } : {}),
             }, { writeFile, mkdir });
         }
         failures.push(`${clientId}: HTTP ${status}`);
@@ -238,7 +243,7 @@ export async function refreshAccessToken(config, { fetchImpl = fetch, writeFile 
 
     throw new AuthError(
         `Feedly token refresh failed (${failures.join('; ')}).`,
-        'The refresh token may have been revoked; run `feedly login --refresh-token <token>` again.',
+        'A Feedly refresh token only works with the client that created it. Re-run `feedly login` to mint a new one.',
     );
 }
 
@@ -301,8 +306,17 @@ export async function formPost(url, fields, {
 const DEFAULT_OAUTH_CLIENT = { id: 'feedlydev', secret: 'feedlydev' };
 
 /**
+ * Client id used by browser login. `feedlydev` is Feedly's public developer
+ * client — the same one `https://feedly.com/v3/auth/dev` uses. `feedly` cannot
+ * be used here: the device grant requires a client_secret, and no secret for
+ * `feedly` is available (guesses are rejected with `bad client_secret`).
+ */
+export const OAUTH_CLIENT_ID = DEFAULT_OAUTH_CLIENT.id;
+
+/**
  * OAuth 2.0 device authorization (RFC 8628) against Feedly's public dev
- * client. Returns the `user_code`, the URL to approve, and the device code.
+ * client. Returns the `user_code`, the URL to approve, the device code, and
+ * the `clientId` the tokens will be bound to.
  */
 export async function requestDeviceCode({
     fetchImpl = fetch,
@@ -331,6 +345,8 @@ export async function requestDeviceCode({
         verificationUriComplete: data.verification_uri_complete || '',
         expiresIn: Number(data.expires_in || 900),
         interval: Number(data.interval || 5),
+        // The minted refresh token is bound to this client id.
+        clientId,
     };
 }
 
@@ -391,7 +407,7 @@ export async function deviceLogin({
     while (now() < deadline) {
         await sleep(interval);
         const result = await pollDeviceToken({ deviceCode: device.deviceCode, fetchImpl, env, clientId, clientSecret });
-        if (result.status === 'approved') return { device, tokens: result.tokens };
+        if (result.status === 'approved') return { device, tokens: result.tokens, clientId };
         if (result.status === 'slow_down') {
             interval += 5000;
             continue;

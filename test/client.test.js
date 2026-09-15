@@ -164,18 +164,55 @@ describe('token refresh and API helper', () => {
         assert.equal(JSON.parse(readFileSync(config.path, 'utf-8')).refresh_token, 'refresh-2');
     });
 
+    it('remembers the client that worked so later refreshes hit it first', async () => {
+        // A refresh token is bound to its minting client; after falling back to
+        // feedlydev the config should record it rather than retrying feedly.
+        const first = [];
+        await refreshAccessToken(config, {
+            fetchImpl: async (_url, init) => {
+                first.push(init.body.get('client_id'));
+                if (first.length === 1) return jsonResponse(400, { error: 'invalid refresh_token' });
+                return jsonResponse(200, { access_token: 'a', expires_in: 60 });
+            },
+        });
+        assert.deepEqual(first, ['feedly', 'feedlydev']);
+        assert.equal(JSON.parse(readFileSync(config.path, 'utf-8')).client_id, 'feedlydev');
+
+        // Second refresh goes straight to the recorded client.
+        const second = [];
+        const reloaded = configFromRaw(config.path, JSON.parse(readFileSync(config.path, 'utf-8')));
+        await refreshAccessToken(reloaded, {
+            fetchImpl: async (_url, init) => {
+                second.push(init.body.get('client_id'));
+                return jsonResponse(200, { access_token: 'b', expires_in: 60 });
+            },
+        });
+        assert.deepEqual(second, ['feedlydev']);
+    });
+
     it('prefers a configured client id before the defaults', async () => {
         const seenClientIds = [];
         const withClient = { ...config, clientId: 'custom', clientSecret: 'secret' };
         const fetchImpl = async (_url, init) => {
             seenClientIds.push(init.body.get('client_id'));
-            assert.equal(init.body.get('client_secret'), 'secret');
             return jsonResponse(200, { access_token: 'access-3', expires_in: 60 });
         };
 
         await refreshAccessToken(withClient, { fetchImpl });
 
         assert.deepEqual(seenClientIds, ['custom']);
+    });
+
+    it('does not send client_secret on refresh, where it is ignored', async () => {
+        const withSecret = { ...config, clientSecret: 'secret' };
+        let body;
+        await refreshAccessToken(withSecret, {
+            fetchImpl: async (_url, init) => {
+                body = init.body;
+                return jsonResponse(200, { access_token: 'a', expires_in: 60 });
+            },
+        });
+        assert.equal(body.get('client_secret'), null);
     });
 
     it('fails with AuthError when no refresh token is available', async () => {

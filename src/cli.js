@@ -4,6 +4,7 @@ import { parseArgs } from 'node:util';
 import { ArgumentError, AuthError, ConfigError, FeedlyError } from './errors.js';
 import {
     DEFAULT_TIMEOUT_MS,
+    OAUTH_CLIENT_ID,
     configCandidates,
     configFromRaw,
     defaultConfigPath,
@@ -186,8 +187,8 @@ const COMMANDS = {
             device: { type: 'boolean', help: 'Use the browser/device flow even when stdin is not a TTY' },
             paste: { type: 'boolean', help: 'Print the token page URL and read the token from stdin' },
             'print-url': { type: 'boolean', help: 'Only print the login URL, then exit' },
-            'client-id': { type: 'string', value: '<id>', help: `OAuth client id (default: ${'feedlydev'})` },
-            'client-secret': { type: 'string', value: '<secret>', help: 'OAuth client secret for a custom client' },
+            'client-id': { type: 'string', value: '<id>', help: `OAuth client id for browser login (default: ${OAUTH_CLIENT_ID})` },
+            'client-secret': { type: 'string', value: '<secret>', help: 'OAuth client secret for browser login (device flow only)' },
             'no-verify': { type: 'boolean', help: 'Skip the profile check after storing the token' },
         },
         columns: ['status', 'path', 'id', 'email', 'name'],
@@ -264,6 +265,10 @@ const COMMANDS = {
                     ...(result.tokens.refresh_token ? { refresh_token: result.tokens.refresh_token } : {}),
                     ...(result.tokens.id ? { user_id: result.tokens.id } : {}),
                     expires_at: Date.now() + expiresIn,
+                    // The refresh token is bound to the client that minted it, so
+                    // record it; otherwise every refresh wastes a request on the
+                    // wrong client before falling back.
+                    client_id: result.clientId || values['client-id'] || OAUTH_CLIENT_ID,
                 });
             }
 

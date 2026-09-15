@@ -9,6 +9,32 @@ version contained, so the `package.json` history stays auditable.
 
 ## [Unreleased]
 
+## [1.4.2] - 2026-09-15
+
+### Fixed
+
+- `feedly login` now records the OAuth `client_id` that minted the refresh
+  token. A Feedly refresh token is **bound to its minting client** (a token from
+  `feedly` is rejected with `invalid refresh_token` by `feedlydev`, and vice
+  versa), so a browser login previously made every refresh send a failing
+  request to `feedly` before falling back to `feedlydev`. Refreshes now hit the
+  right client on the first attempt.
+- `refreshAccessToken` persists the client id that succeeded, so configs
+  created before this release self-heal after one refresh.
+
+### Changed
+
+- `refreshAccessToken` no longer sends `client_secret`. Feedly ignores it on the
+  refresh grant (a wrong value still succeeds), so it was dead weight; the
+  parameter only matters for the device and auth-code flows.
+
+### Documentation
+
+- `docs/api-notes.md` corrected: the public client is `feedlydev` and only its
+  device/auth-code grants require a secret; `feedly` cannot be used for login
+  because no secret for it is available. Documents the client-binding rule, and
+  that `expires_in` is 604800s (7 days).
+
 ## [1.4.1] - 2026-09-15
 
 ### Fixed
@@ -90,7 +116,8 @@ version contained, so the `package.json` history stays auditable.
   output, config discovery (including `~/.opencli/feedly.json`), refresh-token
   rotation, and typed errors with exit codes 2/3/4.
 
-[Unreleased]: https://github.com/coolxll/feedly-cli/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/coolxll/feedly-cli/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/coolxll/feedly-cli/compare/v1.4.1...v1.4.2
 [1.4.1]: https://github.com/coolxll/feedly-cli/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/coolxll/feedly-cli/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/coolxll/feedly-cli/compare/v1.2.0...v1.3.0
