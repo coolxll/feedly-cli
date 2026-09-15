@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
-import { ArgumentError, FeedlyError } from './errors.js';
+import { ArgumentError, AuthError, ConfigError, FeedlyError } from './errors.js';
 import {
     DEFAULT_TIMEOUT_MS,
     configCandidates,
@@ -29,6 +29,7 @@ import {
 } from './commands.js';
 import { FORMATS, objectCursorText, renderObject, renderRows } from './output.js';
 import { FEEDLY_DEV_PAGE, openUrl, parseTokenInput, promptLine } from './login.js';
+import { AGENT_HINT, defaultSkillRoot, installSkill, listSkillFiles, packagedSkillDir, readSkillFile, skillStatus } from './skills.js';
 import { VERSION } from './version.js';
 
 /* -------------------------------------------------------------------------- */
@@ -250,6 +251,65 @@ const COMMANDS = {
         },
     },
 
+    skill: {
+        summary: 'Print or install the bundled AI agent skill',
+        positionals: [
+            { name: 'action', required: false, help: 'Print SKILL.md (default), or: list, read, install, status' },
+            { name: 'file', required: false, help: 'File to print with `read`, e.g. references/search-api.md' },
+        ],
+        options: {
+            force: { type: 'boolean', help: 'Overwrite an existing installation' },
+            link: { type: 'boolean', help: 'Symlink instead of copying (local development)' },
+            'dry-run': { type: 'boolean', help: 'Report what would happen without writing' },
+            root: { type: 'string', value: '<dir>', help: 'Skills directory (default ~/.agents/skills)' },
+        },
+        run: async (values, ctx) => {
+            const action = String(values.action || '').trim().toLowerCase();
+            const home = ctx.env.HOME || undefined;
+            const root = values.root || defaultSkillRoot(home ? { home } : {});
+            const asJson = ctx.format === 'json' || ctx.format === 'jsonl';
+
+            switch (action) {
+                case '':
+                case 'read':
+                case 'show':
+                case 'cat': {
+                    const { path, content } = readSkillFile(values.file || 'SKILL.md');
+                    return asJson ? [{ action: 'read', path, content }] : content;
+                }
+                case 'list': {
+                    return listSkillFiles(packagedSkillDir()).map((file) => ({ file }));
+                }
+                case 'install': {
+                    const result = installSkill({
+                        root,
+                        force: Boolean(values.force),
+                        link: Boolean(values.link),
+                        dryRun: Boolean(values['dry-run']),
+                    });
+                    if (result.status === 'error') {
+                        throw new ConfigError(`Could not install the skill: ${result.error}`);
+                    }
+                    return [{ action: result.status, path: result.path, status: result.status }];
+                }
+                case 'status':
+                case 'path': {
+                    const status = skillStatus({ root });
+                    return [{
+                        action: 'status',
+                        path: status.path,
+                        status: `installed=${status.installed}${status.mode ? ` (${status.mode})` : ''}`,
+                    }];
+                }
+                default:
+                    throw new ArgumentError(
+                        `Unknown skill action: ${action}`,
+                        'Use one of: (none), read, list, install, status.',
+                    );
+            }
+        },
+    },
+
     config: {
         summary: 'Show config file candidates and credential status',
         columns: ['path', 'exists', 'credentials', 'expires_at'],
@@ -336,9 +396,11 @@ function parseCommandLine(argv) {
 
     const positionals = parsed.positionals.slice(1);
     const values = { ...parsed.values };
-    if (command === 'search') values.query = positionals[0] || '';
-
     const spec = COMMANDS[command];
+    for (const [index, positional] of (spec?.positionals || []).entries()) {
+        values[positional.name] = positionals[index] ?? '';
+    }
+
     const allowed = spec?.positionals?.length || 0;
     if (positionals.length > allowed) {
         throw new ArgumentError(`Unexpected argument: ${positionals[allowed]}`);
@@ -471,6 +533,8 @@ export function renderHelp(command = '') {
         '',
         `Run \`feedly <command> --help\` for command options. Version ${VERSION}.`,
         '',
+        AGENT_HINT,
+        '',
     ].join('\n');
 }
 
@@ -546,6 +610,10 @@ function reportError(error, stderr, verbose) {
     const message = error?.message || String(error);
     write(stderr, `error: ${message}\n`);
     if (error instanceof FeedlyError && error.hint) write(stderr, `hint: ${error.hint}\n`);
+    // Point agents at the bundled skill for setup/auth problems.
+    if (error instanceof ConfigError || error instanceof AuthError) {
+        write(stderr, 'hint: run `feedly skill` for agent usage, or `feedly login` to sign in.\n');
+    }
     if (verbose && error?.stack) write(stderr, `${error.stack}\n`);
     if (error instanceof FeedlyError) return error.exitCode;
     return 1;
@@ -586,6 +654,7 @@ export async function run(argv = [], io = {}) {
             stdin,
             stdout,
             stderr,
+            format,
             api: { env, configPath: values.config || '', timeout },
         };
 
@@ -598,6 +667,12 @@ export async function run(argv = [], io = {}) {
 
         const result = await spec.run(values, ctx);
         const columns = resolveColumns(values, spec);
+
+        // Commands may return raw text (skill docs) instead of rows.
+        if (typeof result === 'string') {
+            write(stdout, result.endsWith('\n') ? result : `${result}\n`);
+            return 0;
+        }
 
         if (spec.object) {
             write(stdout, renderObject(result, { columns, format, wide: Boolean(values.wide) }));

@@ -362,6 +362,43 @@ describe('feedly CLI end to end', () => {
         assert.match(unexpected.stderr, /Unexpected argument: extra/);
     });
 
+    it('prints and installs the bundled agent skill', async () => {
+        const skillHome = mkdtempSync(join(tmpdir(), 'feedly-skill-e2e-'));
+        try {
+            // `feedly skill` prints SKILL.md so an agent can self-serve.
+            const read = await runCli(['skill'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(read.code, 0);
+            assert.match(read.stdout, /^---\nname: feedly-cli\n/);
+
+            const listing = await runCli(['skill', 'list'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(listing.code, 0);
+            assert.match(listing.stdout, /SKILL\.md/);
+            assert.match(listing.stdout, /references\/search-api\.md/);
+
+            const dry = await runCli(['skill', 'install', '--dry-run', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(JSON.parse(dry.stdout)[0].status, 'would-install');
+            assert.equal(existsSync(join(skillHome, '.agents', 'skills', 'feedly-cli')), false);
+
+            const installed = await runCli(['skill', 'install', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(JSON.parse(installed.stdout)[0].status, 'installed');
+            assert.equal(existsSync(join(skillHome, '.agents', 'skills', 'feedly-cli', 'SKILL.md')), true);
+
+            const status = await runCli(['skill', 'status', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.match(JSON.parse(status.stdout)[0].status, /installed=yes/);
+
+            const again = await runCli(['skill', 'install', '--json'], { env: cliEnv({ HOME: skillHome }) });
+            assert.equal(JSON.parse(again.stdout)[0].status, 'exists');
+        } finally {
+            rmSync(skillHome, { recursive: true, force: true });
+        }
+    });
+
+    it('advertises the agent skill in help output', async () => {
+        const { stdout } = await runCli(['--help']);
+        assert.match(stdout, /AI agents: this CLI ships its own usage skill/);
+        assert.match(stdout, /feedly skill {2,}print the agent instructions/);
+    });
+
     it('surfaces API failures with exit code 4', async () => {
         const { code, stderr } = await runCli(['profile'], {
             env: cliEnv({ FEEDLY_API_BASE: `${baseUrl}/nope` }),

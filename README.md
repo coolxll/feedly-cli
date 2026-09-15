@@ -32,6 +32,13 @@ feedly --version
 feedly --help
 ```
 
+Then sign in (browser, device flow) and make the CLI discoverable to agents:
+
+```bash
+feedly login
+feedly skill install     # -> ~/.agents/skills/feedly-cli
+```
+
 ## Credentials
 
 ### Option A: sign in through the browser (recommended)
@@ -136,6 +143,7 @@ feedly login --refresh-token "$(jq -r .refresh_token ~/.opencli/feedly.json)"
 | `feedly subscriptions` | List feed subscriptions with unread counts |
 | `feedly counts` | List raw unread marker counts |
 | `feedly mark-read` | Mark entries read (requires `--confirm MARK_READ`) |
+| `feedly skill` | Print or install the bundled AI agent skill |
 | `feedly login` | Sign in via browser (device flow) or store an existing token |
 | `feedly config` | Show config candidates and credential status |
 
@@ -244,6 +252,55 @@ variables are configured.
 | `FEEDLY_SEARCH_API_BASE` | Override the search API base (default `https://api.feedly.com/v3`) |
 | `XDG_CONFIG_HOME` | Base directory for the default config location |
 | `NODE_USE_ENV_PROXY` | Honor `HTTP(S)_PROXY` with the built-in fetch |
+
+## For AI agents
+
+A CLI that an agent cannot discover is a CLI that does not exist. `feedly`
+ships its own usage skill and can hand it to an agent on demand, so nothing has
+to be installed separately for the agent to learn the tool.
+
+| Command | What it does |
+| --- | --- |
+| `feedly skill` | Print `SKILL.md` — the full agent instructions |
+| `feedly skill list` | List bundled skill files |
+| `feedly skill read <file>` | Print one file, e.g. `references/search-api.md` |
+| `feedly skill install` | Install into `~/.agents/skills/feedly-cli` |
+| `feedly skill status` | Check whether it is installed |
+
+So an agent can bootstrap itself with a single command:
+
+```bash
+feedly skill                 # read the instructions
+feedly skill install         # make them discoverable in future sessions
+```
+
+`--help` also advertises this, and auth/config failures print
+`hint: run \`feedly skill\` for agent usage`.
+
+### Where the skill is installed
+
+`feedly skill install` writes to **`~/.agents/skills/feedly-cli`** — the
+[Agent Skills](https://agentskills.io/specification) standard global directory.
+
+- **pi** reads `~/.agents/skills/` natively — nothing else to do.
+- Other harnesses can point at the same directory from their own settings, e.g.
+  pi: `{"skills": ["~/.agents/skills"]}`, or Claude Code / Codex can be pointed
+  at it the same way.
+
+Useful flags: `--force` (overwrite), `--link` (symlink for local development),
+`--dry-run`, `--root <dir>` (install somewhere else).
+
+The CLI has **no dependency on any agent harness**: the skill is plain Markdown,
+and installing it is a file copy.
+
+### Package layout
+
+```
+skills/feedly-cli/
+├── SKILL.md                    # entry point (name + description frontmatter)
+├── references/search-api.md    # deep-dive, loaded on demand
+└── agents/openai.yaml          # display metadata for agent UIs
+```
 
 ## Library usage
 
