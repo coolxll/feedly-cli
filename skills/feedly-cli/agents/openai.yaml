@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feedly CLI"
+  short_description: "Read and search Feedly from the terminal"
+  default_prompt: "Use $feedly-cli to inspect my Feedly account, search sources, and mark entries read."

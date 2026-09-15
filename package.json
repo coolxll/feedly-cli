@@ -1,0 +1,47 @@
+{
+  "name": "@coolxll/feedly-cli",
+  "version": "1.0.0",
+  "description": "Standalone Feedly CLI: profile, unread streams, search, subscriptions, and read markers. No OpenCLI required.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "feedly": "bin/feedly.js"
+  },
+  "main": "src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./commands": "./src/commands.js",
+    "./output": "./src/output.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "skills/",
+    "docs/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch"
+  },
+  "keywords": [
+    "feedly",
+    "rss",
+    "cli",
+    "news",
+    "reader",
+    "unread"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/coolxll/feedly-cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
