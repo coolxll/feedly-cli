@@ -4,6 +4,7 @@ Standalone Feedly CLI — profile, unread streams, search, subscriptions, catego
 No browser, no OpenCLI, no runtime dependencies. Extracted from the `opencli` Feedly plugin.
 
 - Zero dependencies, ESM, Node.js >= 20 (uses the built-in `fetch`)
+- Browser sign-in via Feedly's OAuth device flow — no token copy-pasting
 - Token refresh with the `feedly` / `feedlydev` public client ids, or a custom client
 - Table, JSON, JSONL, TSV, and CSV output for pipelines
 - Reads your existing `~/.opencli/feedly.json` automatically (easy migration)
@@ -33,14 +34,69 @@ feedly --help
 
 ## Credentials
 
-`feedly` looks for a config JSON in this order:
+### Option A: sign in through the browser (recommended)
+
+```bash
+feedly login
+```
+
+This uses Feedly's OAuth **device flow**: it prints a short code, opens your
+browser (or prints a URL when no browser is available), and waits until you
+approve the request. The refresh token is then stored and verified
+automatically — no copy-pasting tokens.
+
+```
+$ feedly login
+
+To sign in to Feedly, open:
+  https://cloud.feedly.com/v3/auth/connect/ABC-DEF-GHI
+
+Confirm this code: ABC-DEF-GHI
+
+Opened your browser. Approve the request there; waiting…
+
+STATUS     PATH                             ID       EMAIL               NAME
+logged_in  ~/.config/feedly/config.json     abc123   you@example.com     You
+```
+
+Useful variants:
+
+| Command | Use case |
+| --- | --- |
+| `feedly login --no-browser` | Print the URL and code; approve from any device |
+| `feedly login --print-url` | Print only the URL and exit (scripts/headless) |
+| `feedly login --device` | Force the device flow even when stdin is not a TTY |
+| `feedly login --no-verify` | Store without checking `/profile` (offline setups) |
+| `feedly login --client-id X --client-secret Y` | Sign in with your own registered OAuth app |
+
+> Feedly does not allow loopback redirect URIs (`http://127.0.0.1:...`) for the
+> public clients, so a local callback server is not possible; the device flow is
+> used instead. It relies on Feedly's public developer client
+> (`feedlydev`), the same client the official developer-token page uses.
+
+### Option B: paste an existing token
+
+```bash
+feedly login --paste                       # prints the page URL, reads a token from stdin
+feedly login --refresh-token "<token>"
+feedly login --access-token "<token>"
+feedly login --token @/path/to/token.txt    # read from a file
+```
+
+`--paste` (and any non-TTY stdin) accepts a bare refresh/access token, a copied
+`Authorization: Bearer …` header, or the whole JSON blob from Feedly's
+[developer token page](https://feedly.com/v3/auth/dev) — `user_id` is preserved
+when present. Tokens can also come from `FEEDLY_REFRESH_TOKEN` /
+`FEEDLY_ACCESS_TOKEN` for CI.
+
+### Config discovery
+
+The config JSON is looked up in this order:
 
 1. `--config <path>` or `FEEDLY_CONFIG_PATH`
 2. `$XDG_CONFIG_HOME/feedly/config.json` (default `~/.config/feedly/config.json`)
 3. `~/.feedly.json`
 4. `~/.opencli/feedly.json` (OpenCLI plugin compatibility)
-
-The file must contain `refresh_token` (recommended) or `access_token`:
 
 ```json
 {
@@ -54,20 +110,9 @@ Check what is discovered:
 feedly config
 ```
 
-Store a token and verify it in one step:
-
-```bash
-feedly login --refresh-token "<token>"
-# or a static access token
-feedly login --access-token "<token>"
-
-# custom client id / secret when you have your own OAuth app
-feedly login --refresh-token "<token>" --client-id my-client --client-secret my-secret
-```
-
-`login` writes the config with `0600` permissions and validates it against
-Feedly before reporting success. Tokens can also come from
-`FEEDLY_REFRESH_TOKEN` / `FEEDLY_ACCESS_TOKEN`.
+`feedly login` writes the config with `0600` permissions and, unless
+`--no-verify` is given, validates the credentials against Feedly before
+reporting success.
 
 ### Migrating from OpenCLI
 
@@ -91,7 +136,7 @@ feedly login --refresh-token "$(jq -r .refresh_token ~/.opencli/feedly.json)"
 | `feedly subscriptions` | List feed subscriptions with unread counts |
 | `feedly counts` | List raw unread marker counts |
 | `feedly mark-read` | Mark entries read (requires `--confirm MARK_READ`) |
-| `feedly login` | Store a token in the config file and verify it |
+| `feedly login` | Sign in via browser (device flow) or store an existing token |
 | `feedly config` | Show config candidates and credential status |
 
 Run `feedly <command> --help` for the full option list.

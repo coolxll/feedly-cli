@@ -206,15 +206,6 @@ function networkErrorHint(env) {
     return `A proxy is configured (${proxy}) but Node's fetch ignores proxy environment variables by default. Re-run with NODE_USE_ENV_PROXY=1 (Node >= 23.6).`;
 }
 
-async function fetchForToken(url, init, env, fetchImpl) {
-    try {
-        return await fetchImpl(url, init);
-    } catch (err) {
-        const cause = err?.cause?.message ? ` (${err.cause.message})` : '';
-        throw new ApiError(`Feedly token refresh request failed: ${err?.message || err}${cause}`, { hint: networkErrorHint(env) });
-    }
-}
-
 export async function refreshAccessToken(config, { fetchImpl = fetch, writeFile = writeFileSync, mkdir = mkdirSync, env = process.env } = {}) {
     if (!config.refreshToken) {
         throw new AuthError(
@@ -225,20 +216,13 @@ export async function refreshAccessToken(config, { fetchImpl = fetch, writeFile 
 
     const failures = [];
     for (const clientId of refreshClientIds(config)) {
-        const body = new URLSearchParams({
+        const { ok, status, data } = await formPost(`${resolveApiBases(env).apiBase}/auth/token`, {
             grant_type: 'refresh_token',
             refresh_token: config.refreshToken,
             client_id: clientId,
-        });
-        if (config.clientSecret) body.set('client_secret', config.clientSecret);
-
-        const resp = await fetchForToken(`${resolveApiBases(env).apiBase}/auth/token`, {
-            method: 'POST',
-            headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
-            body,
-        }, env, fetchImpl);
-        const data = await parseJsonResponse(resp, `Feedly token refresh (${clientId})`);
-        if (resp.ok && isRecord(data) && typeof data.access_token === 'string' && data.access_token.trim()) {
+            ...(config.clientSecret ? { client_secret: config.clientSecret } : {}),
+        }, { fetchImpl, timeout: DEFAULT_TIMEOUT_MS, env });
+        if (ok && isRecord(data) && typeof data.access_token === 'string' && data.access_token.trim()) {
             const expiresIn = Math.max(1, Number(data.expires_in || 3600)) * 1000;
             return saveConfig(config, {
                 access_token: data.access_token,
@@ -249,7 +233,7 @@ export async function refreshAccessToken(config, { fetchImpl = fetch, writeFile 
                 ...(data.refresh_token && config.raw.refreshToken !== undefined ? { refreshToken: data.refresh_token } : {}),
             }, { writeFile, mkdir });
         }
-        failures.push(`${clientId}: HTTP ${resp.status}`);
+        failures.push(`${clientId}: HTTP ${status}`);
     }
 
     throw new AuthError(
@@ -279,6 +263,153 @@ function buildUrl(path, query = {}, apiBase = DEFAULT_API_BASE) {
         }
     }
     return url.toString();
+}
+
+/**
+ * POST an `application/x-www-form-urlencoded` body and decode the response.
+ * Never throws on HTTP errors: callers inspect `{ ok, status, data }` so that
+ * OAuth polling can distinguish `authorization_pending` from real failures.
+ */
+export async function formPost(url, fields, {
+    fetchImpl = fetch,
+    timeout = DEFAULT_TIMEOUT_MS,
+    env = process.env,
+    retry = true,
+} = {}) {
+    const body = new URLSearchParams();
+    for (const [key, value] of Object.entries(fields)) {
+        if (value !== undefined && value !== null) body.set(key, String(value));
+    }
+
+    let resp;
+    try {
+        resp = await fetchWithTimeout(fetchImpl, url, {
+            method: 'POST',
+            headers: { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' },
+            body,
+        }, timeout, env);
+    } catch (err) {
+        if (err instanceof ApiError && !retry) throw err;
+        if (err instanceof ApiError && /timed out/.test(err.message)) throw err;
+        throw new ApiError(`Feedly request failed: ${err?.message || err}`, { hint: networkErrorHint(env) });
+    }
+
+    const data = await parseJsonResponse(resp, `Feedly ${new URL(url).pathname}`);
+    return { ok: Boolean(resp.ok), status: resp.status, data };
+}
+
+const DEFAULT_OAUTH_CLIENT = { id: 'feedlydev', secret: 'feedlydev' };
+
+/**
+ * OAuth 2.0 device authorization (RFC 8628) against Feedly's public dev
+ * client. Returns the `user_code`, the URL to approve, and the device code.
+ */
+export async function requestDeviceCode({
+    fetchImpl = fetch,
+    env = process.env,
+    clientId = DEFAULT_OAUTH_CLIENT.id,
+    clientSecret = DEFAULT_OAUTH_CLIENT.secret,
+    scope = 'https://cloud.feedly.com/subscriptions',
+} = {}) {
+    const { ok, status, data } = await formPost(`${resolveApiBases(env).apiBase}/auth/device`, {
+        client_id: clientId,
+        client_secret: clientSecret,
+        scope,
+    }, { fetchImpl, env });
+
+    if (!ok || !isRecord(data) || typeof data.device_code !== 'string') {
+        throw new AuthError(
+            `Feedly device authorization failed: ${stringField(data || {}, 'errorMessage', 'error') || `HTTP ${status}`}`,
+            'Loopback OAuth redirect URIs are not allow-listed by Feedly, so `feedly login` uses the device flow.',
+        );
+    }
+
+    return {
+        deviceCode: data.device_code,
+        userCode: data.user_code || '',
+        verificationUri: data.verification_uri || 'https://cloud.feedly.com/v3/auth/connect',
+        verificationUriComplete: data.verification_uri_complete || '',
+        expiresIn: Number(data.expires_in || 900),
+        interval: Number(data.interval || 5),
+    };
+}
+
+/**
+ * A single device-flow poll. Returns `{ status: 'pending' | 'slow_down' |
+ * 'approved' | 'denied' | 'expired' }` plus the token payload when approved.
+ */
+export async function pollDeviceToken({
+    deviceCode,
+    fetchImpl = fetch,
+    env = process.env,
+    clientId = DEFAULT_OAUTH_CLIENT.id,
+    clientSecret = DEFAULT_OAUTH_CLIENT.secret,
+} = {}) {
+    const { ok, status, data } = await formPost(`${resolveApiBases(env).apiBase}/auth/token`, {
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: deviceCode,
+        client_id: clientId,
+        client_secret: clientSecret,
+    }, { fetchImpl, env });
+
+    if (ok && isRecord(data) && typeof data.access_token === 'string') {
+        return { status: 'approved', tokens: data };
+    }
+
+    const error = stringField(data || {}, 'error', 'errorCode') || `HTTP ${status}`;
+    const message = String(error).toLowerCase();
+    if (message.includes('authorization_pending') || message.includes('pending')) return { status: 'pending' };
+    if (message.includes('slow_down') || message.includes('slow down')) return { status: 'slow_down' };
+    if (message.includes('access_denied') || message.includes('denied')) return { status: 'denied' };
+    if (message.includes('expired')) return { status: 'expired' };
+    return { status: 'failed', message: stringField(data || {}, 'errorMessage', 'error') || message };
+}
+
+/**
+ * Interactive device login: runs `onPrompt` with the code and URL, then polls
+ * until approval, denial, expiry, or `deadline`. Injectable clock/sleep keep
+ * this unit-testable.
+ */
+export async function deviceLogin({
+    onPrompt,
+    fetchImpl = fetch,
+    env = process.env,
+    clientId = DEFAULT_OAUTH_CLIENT.id,
+    clientSecret = DEFAULT_OAUTH_CLIENT.secret,
+    now = () => Date.now(),
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    onTick,
+    intervalMs,
+    maxWaitMs = DEFAULT_TIMEOUT_MS * 20,
+} = {}) {
+    const device = await requestDeviceCode({ fetchImpl, env, clientId, clientSecret });
+    if (typeof onPrompt === 'function') await onPrompt(device);
+
+    const deadline = now() + Math.min(device.expiresIn * 1000, maxWaitMs);
+    let interval = intervalMs && intervalMs > 0 ? intervalMs : Math.max(1, device.interval) * 1000;
+
+    while (now() < deadline) {
+        await sleep(interval);
+        const result = await pollDeviceToken({ deviceCode: device.deviceCode, fetchImpl, env, clientId, clientSecret });
+        if (result.status === 'approved') return { device, tokens: result.tokens };
+        if (result.status === 'slow_down') {
+            interval += 5000;
+            continue;
+        }
+        if (result.status === 'denied') {
+            throw new AuthError('Feedly device login was denied in the browser.', 'Run `feedly login` again to retry.');
+        }
+        if (result.status === 'expired') break;
+        if (result.status === 'failed') {
+            throw new AuthError(`Feedly device login failed: ${result.message}`);
+        }
+        if (typeof onTick === 'function') onTick(result);
+    }
+
+    throw new AuthError(
+        'Timed out waiting for Feedly device approval.',
+        'Re-run `feedly login` and approve the code in the browser before it expires.',
+    );
 }
 
 async function fetchWithTimeout(fetchImpl, url, init, timeout, env) {

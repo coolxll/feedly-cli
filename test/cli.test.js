@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
 const BIN = fileURLToPath(new URL('../bin/feedly.js', import.meta.url));
+const VERSION = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf-8')).version;
 
 let server;
 let baseUrl;
@@ -16,6 +17,8 @@ let configPath;
 let markerPayloads;
 let searchBodies;
 let tokenRequests;
+let deviceRequests;
+let devicePolls;
 
 async function readBody(req) {
     const chunks = [];
@@ -57,6 +60,8 @@ before(async () => {
     markerPayloads = [];
     searchBodies = [];
     tokenRequests = [];
+    deviceRequests = [];
+    devicePolls = [];
 
     server = createServer(async (req, res) => {
         const url = new URL(req.url, 'http://127.0.0.1');
@@ -65,12 +70,30 @@ before(async () => {
             res.end(data === undefined ? '' : JSON.stringify(data));
         };
 
+        if (url.pathname === '/v3/auth/device') {
+            deviceRequests.push(await readBody(req));
+            return send(200, {
+                device_code: 'device-code-1',
+                user_code: 'ABC-DEF-GHI',
+                verification_uri: 'https://cloud.feedly.com/v3/auth/connect',
+                verification_uri_complete: 'https://cloud.feedly.com/v3/auth/connect/ABC-DEF-GHI',
+                expires_in: 900,
+                interval: 1,
+            });
+        }
+
         if (url.pathname === '/v3/auth/token') {
-            tokenRequests.push(await readBody(req));
+            const body = await readBody(req);
+            tokenRequests.push(body);
+            if (body.includes('grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code')) {
+                devicePolls.push(body);
+                if (devicePolls.length < 2) return send(400, { error: 'authorization_pending' });
+                return send(200, { access_token: 'device-token', refresh_token: 'device-refresh', expires_in: 3600 });
+            }
             return send(200, { access_token: 'refreshed-token', refresh_token: 'refresh-rotated', expires_in: 3600 });
         }
 
-        if (req.headers.authorization !== 'Bearer test-token' && req.headers.authorization !== 'Bearer refreshed-token') {
+        if (req.headers.authorization !== 'Bearer test-token' && req.headers.authorization !== 'Bearer refreshed-token' && req.headers.authorization !== 'Bearer device-token') {
             return send(401, { errorMessage: 'bad token' });
         }
 
@@ -127,7 +150,7 @@ describe('feedly CLI end to end', () => {
     it('prints version and help', async () => {
         const version = await runCli(['--version']);
         assert.equal(version.code, 0);
-        assert.equal(version.stdout.trim(), '1.0.0');
+        assert.equal(version.stdout.trim(), VERSION);
 
         const help = await runCli([]);
         assert.equal(help.code, 0);
@@ -231,6 +254,86 @@ describe('feedly CLI end to end', () => {
         assert.equal(stored.refresh_token, 'refresh-rotated');
         assert.equal(stored.access_token, 'refreshed-token');
         assert.match(tokenRequests.at(-1), /client_id=feedly/);
+    });
+
+    it('logs in through the device flow without a browser', async () => {
+        const loginPath = join(dir, 'device-login.json');
+        devicePolls.length = 0;
+
+        const stored = await runCli(
+            ['login', '--device', '--no-browser', '--no-verify', '--config', loginPath, '--json'],
+            { env: cliEnv({ BROWSER: '', DISPLAY: '', CI: '' }) },
+        );
+
+        assert.equal(stored.code, 0, stored.stderr);
+        // The device code and approval URL must be surfaced to the user.
+        assert.match(stored.stderr, /ABC-DEF-GHI/);
+        assert.match(stored.stderr, /https:\/\/cloud\.feedly\.com\/v3\/auth\/connect\/ABC-DEF-GHI/);
+        assert.equal(JSON.parse(stored.stdout)[0].status, 'stored');
+
+        // Tokens come from the device grant, persisted as returned.
+        const config = JSON.parse(readFileSync(loginPath, 'utf-8'));
+        assert.equal(config.access_token, 'device-token');
+        assert.equal(config.refresh_token, 'device-refresh');
+        assert.equal(deviceRequests.length, 1);
+        assert.match(deviceRequests[0], /client_id=feedlydev/);
+        // Pending then approved: the CLI keeps polling until tokens arrive.
+        assert.equal(devicePolls.length, 2);
+
+        // A second run verifies the stored credentials against /profile.
+        const verified = await runCli(
+            ['login', '--device', '--no-browser', '--config', loginPath, '--json'],
+            { env: cliEnv({ BROWSER: '', DISPLAY: '', CI: '' }) },
+        );
+        assert.equal(verified.code, 0, verified.stderr);
+        assert.equal(JSON.parse(verified.stdout)[0].status, 'logged_in');
+        assert.equal(JSON.parse(verified.stdout)[0].id, 'user-1');
+    });
+
+    it('prints a login URL with --print-url without writing config', async () => {
+        const loginPath = join(dir, 'print-url.json');
+        const { code, stdout } = await runCli(['login', '--print-url', '--config', loginPath], { env: cliEnv() });
+        assert.equal(code, 0);
+        assert.match(stdout, /^https:\/\/cloud\.feedly\.com\/v3\/auth\/connect\/ABC-DEF-GHI\n$/);
+        assert.equal(existsSync(loginPath), false);
+    });
+
+    it('accepts a pasted token JSON on stdin and keeps the user id', async () => {
+        const loginPath = join(dir, 'pasted.json');
+        const payload = JSON.stringify({ id: 'user-9', refresh_token: 'pasted-refresh' });
+        const { code, stdout } = await runCli(
+            ['login', '--no-verify', '--config', loginPath, '--json'],
+            { env: cliEnv(), input: `${payload}\n` },
+        );
+        assert.equal(code, 0);
+        assert.equal(JSON.parse(stdout)[0].status, 'stored');
+        assert.equal(JSON.parse(stdout)[0].id, 'user-9');
+
+        const stored = JSON.parse(readFileSync(loginPath, 'utf-8'));
+        assert.equal(stored.refresh_token, 'pasted-refresh');
+        assert.equal(stored.user_id, 'user-9');
+    });
+
+    it('stores a token passed through --token @file', async () => {
+        const tokenFile = join(dir, 'token.txt');
+        const loginPath = join(dir, 'file-login.json');
+        writeFileSync(tokenFile, 'file-refresh\n');
+
+        const { code } = await runCli(
+            ['login', '--token', `@${tokenFile}`, '--no-verify', '--config', loginPath],
+            { env: cliEnv() },
+        );
+        assert.equal(code, 0);
+        assert.equal(JSON.parse(readFileSync(loginPath, 'utf-8')).refresh_token, 'file-refresh');
+    });
+
+    it('fails fast when pasted input is empty', async () => {
+        const { code, stderr } = await runCli(
+            ['login', '--config', join(dir, 'never.json')],
+            { env: cliEnv(), input: '' },
+        );
+        assert.equal(code, 2);
+        assert.match(stderr, /No token was provided/);
     });
 
     it('fails with exit code 3 when the config is missing', async () => {

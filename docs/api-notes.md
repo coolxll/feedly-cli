@@ -15,6 +15,36 @@ Override with `FEEDLY_API_BASE` / `FEEDLY_SEARCH_API_BASE`.
 
 `Authorization: Bearer <access token>`.
 
+### Device flow (what `feedly login` uses)
+
+Feedly supports RFC 8628 device authorization:
+
+1. `POST /v3/auth/device` with `client_id`, `client_secret`, `scope` returns
+   `device_code`, `user_code`, `verification_uri(_complete)`, `expires_in` (900s),
+   and `interval` (5s).
+2. The user approves at `https://cloud.feedly.com/v3/auth/connect/<user_code>`.
+3. Poll `POST /v3/auth/token` with
+   `grant_type=urn:ietf:params:oauth:grant-type:device_code` until it stops
+   returning `authorization_pending` (also handle `slow_down`, `access_denied`,
+   and expiry).
+
+Feedly's public developer client is `client_id=feedlydev` with
+`client_secret=feedlydev`; it is the same client used by the official
+`https://feedly.com/v3/auth/dev` token page. Both values are required — omitting
+`client_secret` yields `missing client_secret`.
+
+Loopback redirect URIs are **not** allow-listed, which is why the device flow is
+used instead of a local callback server:
+
+| `redirect_uri` | Result |
+| --- | --- |
+| `https://feedly.com/v3/auth/dev` | allowed (official PKCE page) |
+| `urn:ietf:wg:oauth:2.0:oob` | allowed |
+| `http://127.0.0.1:<port>/callback` | rejected |
+| `https://localhost:<port>/callback` | `invalid_redirect_uri` |
+
+### Refresh token
+
 `POST /v3/auth/token` exchanges a refresh token:
 
 ```
@@ -36,6 +66,7 @@ seconds and milliseconds and normalized to milliseconds.
 
 | Method | Path | Notes |
 | --- | --- | --- |
+| `POST` | `/v3/auth/device` | Device authorization; needs `client_id` + `client_secret` |
 | `GET` | `/v3/profile` | Account info and the user id |
 | `GET` | `/v3/streams/contents` | `streamId`, `count`, `continuation`, `unreadOnly`, `ranked` |
 | `POST` | `/v3/search/contents` | Search API host; JSON body of `layers` + `source` |

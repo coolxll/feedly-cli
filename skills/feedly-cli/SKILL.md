@@ -20,6 +20,12 @@ discovered at `--config`, `FEEDLY_CONFIG_PATH`,
 `~/.config/feedly/config.json`, `~/.feedly.json`, or `~/.opencli/feedly.json`.
 Never place tokens in commands, skill files, fixtures, or source code.
 
+If credentials are missing or expired and the user can act interactively, run
+`feedly login`: it uses Feedly's OAuth device flow, prints a code plus URL, and
+waits for browser approval. Use `feedly login --print-url` in headless
+sessions to hand the URL to the user. `feedly config` reports what is
+discovered.
+
 ## Choose a command
 
 - Verify credentials or obtain the account id: `feedly profile --json`
@@ -65,8 +71,8 @@ feedly unread --jsonl | jq -r .id | feedly mark-read --ids - --confirm MARK_READ
 ## Failure handling
 
 - Exit code `2`: usage error. Re-read `--help`; do not guess flags.
-- Exit code `3`: config or auth error. Point the user at `feedly login` or
-  `feedly config`; do not fall back to browser scraping.
+- Exit code `3`: config or auth error. Point the user at `feedly login` (device
+  flow) or `feedly config`; do not fall back to browser scraping.
 - Exit code `4`: API or network error. On `401`, the refresh-token retry
   already ran once; ask for credential renewal. On `403`, report that the
   Feedly plan or feature may not permit the request.

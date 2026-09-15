@@ -6,8 +6,10 @@ import {
     configCandidates,
     configFromRaw,
     defaultConfigPath,
+    deviceLogin,
     loadConfig,
     refreshAccessToken,
+    requestDeviceCode,
     saveConfig,
 } from './client.js';
 import {
@@ -26,6 +28,7 @@ import {
     searchContents,
 } from './commands.js';
 import { FORMATS, objectCursorText, renderObject, renderRows } from './output.js';
+import { FEEDLY_DEV_PAGE, openUrl, parseTokenInput, promptLine } from './login.js';
 import { VERSION } from './version.js';
 
 /* -------------------------------------------------------------------------- */
@@ -152,50 +155,98 @@ const COMMANDS = {
     },
 
     login: {
-        summary: 'Store a Feedly token in the config file and verify it',
+        summary: 'Sign in through the browser (device flow) or store an existing token',
         options: {
-            'refresh-token': { type: 'string', value: '<token>', help: 'Feedly refresh token (recommended)' },
-            'access-token': { type: 'string', value: '<token>', help: 'Static Feedly access token' },
-            'client-id': { type: 'string', value: '<id>', help: 'OAuth client id (default: try feedly, then feedlydev)' },
-            'client-secret': { type: 'string', value: '<secret>', help: 'OAuth client secret, when required' },
+            'refresh-token': { type: 'string', value: '<token>', help: 'Skip the browser and store this refresh token' },
+            'access-token': { type: 'string', value: '<token>', help: 'Skip the browser and store this static access token' },
+            'token': { type: 'string', value: '<token|@file>', help: 'Alias for --refresh-token, or a file containing one' },
+            browser: { type: 'boolean', default: true, help: 'Open the browser automatically (default: on)' },
+            'no-browser': { type: 'boolean', help: 'Do not open the browser; print the URL and code only' },
+            device: { type: 'boolean', help: 'Use the browser/device flow even when stdin is not a TTY' },
+            paste: { type: 'boolean', help: 'Print the token page URL and read the token from stdin' },
+            'print-url': { type: 'boolean', help: 'Only print the login URL, then exit' },
+            'client-id': { type: 'string', value: '<id>', help: `OAuth client id (default: ${'feedlydev'})` },
+            'client-secret': { type: 'string', value: '<secret>', help: 'OAuth client secret for a custom client' },
+            'no-verify': { type: 'boolean', help: 'Skip the profile check after storing the token' },
         },
         columns: ['status', 'path', 'id', 'email', 'name'],
         run: async (values, ctx) => {
-            const refreshToken = values['refresh-token'] || ctx.env.FEEDLY_REFRESH_TOKEN || '';
-            const accessToken = values['access-token'] || ctx.env.FEEDLY_ACCESS_TOKEN || '';
-            if (!refreshToken && !accessToken) {
-                throw new ArgumentError(
-                    'login needs --refresh-token or --access-token',
-                    'You can also export FEEDLY_REFRESH_TOKEN or FEEDLY_ACCESS_TOKEN.',
-                );
-            }
-
             const targetPath = values.config || ctx.env.FEEDLY_CONFIG_PATH || defaultConfigPath(ctx.env);
-            let config = existsSync(targetPath)
+            const base = existsSync(targetPath)
                 ? loadConfig({ env: ctx.env, configPath: targetPath })
                 : configFromRaw(targetPath, {});
 
-            if (refreshToken) {
-                config = saveConfig(config, {
-                    refresh_token: refreshToken,
-                    ...(values['client-id'] ? { client_id: values['client-id'] } : {}),
-                    ...(values['client-secret'] ? { client_secret: values['client-secret'] } : {}),
-                });
-                config = await refreshAccessToken(config, { env: ctx.env });
+            const directToken = values.token || values['refresh-token'];
+            const accessToken = values['access-token'] || ctx.env.FEEDLY_ACCESS_TOKEN || '';
+            const envRefresh = ctx.env.FEEDLY_REFRESH_TOKEN || '';
+            const clientPatch = {
+                ...(values['client-id'] ? { client_id: values['client-id'] } : {}),
+                ...(values['client-secret'] ? { client_secret: values['client-secret'] } : {}),
+            };
+
+            let config = base;
+
+            if (directToken || accessToken) {
+                const input = directToken || accessToken;
+                const literal = !directToken && accessToken ? { accessToken } : parseTokenInput(readMaybeFile(input));
+                const patch = {
+                    ...clientPatch,
+                    ...(literal.refreshToken ? { refresh_token: literal.refreshToken } : {}),
+                    ...(literal.accessToken && !literal.refreshToken
+                        ? { access_token: literal.accessToken, expires_at: undefined, expiresAt: undefined }
+                        : {}),
+                };
+                if (!patch.refresh_token && !patch.access_token) {
+                    throw new ArgumentError('No usable token was found in the provided input.');
+                }
+                config = saveConfig(config, patch);
+            } else if (envRefresh) {
+                config = saveConfig(config, { ...clientPatch, refresh_token: envRefresh });
             } else {
+                const useBrowser = values.browser !== false && !values['no-browser'];
+                const interactive = !values['print-url'] && !values.device
+                    && (values.paste || !ctx.stdin.isTTY);
+                if (interactive) return loginWithPaste(values, ctx, config, clientPatch);
+
+                const deviceOptions = {
+                    env: ctx.env,
+                    ...(values['client-id'] ? { clientId: values['client-id'] } : {}),
+                    ...(values['client-secret'] ? { clientSecret: values['client-secret'] } : {}),
+                };
+
+                // `--print-url` is for headless setups: hand back the URL and stop.
+                if (values['print-url']) {
+                    const device = await requestDeviceCode(deviceOptions);
+                    const url = device.verificationUriComplete || device.verificationUri;
+                    write(ctx.stdout, `${url}\n`);
+                    if (device.userCode) write(ctx.stderr, `Confirm this code: ${device.userCode}\n`);
+                    return null;
+                }
+
+                const result = await deviceLogin({
+                    ...deviceOptions,
+                    onPrompt: async ({ verificationUri, verificationUriComplete, userCode }) => {
+                        const url = verificationUriComplete || verificationUri;
+                        write(ctx.stderr, `\nTo sign in to Feedly, open:\n  ${url}\n`);
+                        if (userCode) write(ctx.stderr, `\nConfirm this code: ${userCode}\n`);
+                        const opened = useBrowser ? await openUrl(url, { env: ctx.env }) : false;
+                        write(ctx.stderr, opened
+                            ? '\nOpened your browser. Approve the request there; waiting…\n\n'
+                            : '\nOpen the URL above in a browser to approve. Waiting…\n\n');
+                    },
+                });
+
+                const expiresIn = Math.max(1, Number(result.tokens.expires_in || 3600)) * 1000;
                 config = saveConfig(config, {
-                    access_token: accessToken,
-                    expires_at: undefined,
-                    expiresAt: undefined,
+                    ...clientPatch,
+                    access_token: result.tokens.access_token,
+                    ...(result.tokens.refresh_token ? { refresh_token: result.tokens.refresh_token } : {}),
+                    ...(result.tokens.id ? { user_id: result.tokens.id } : {}),
+                    expires_at: Date.now() + expiresIn,
                 });
             }
 
-            const profile = await getProfile({ config, ...ctx.api });
-            return [{
-                status: 'logged_in',
-                path: config.path,
-                ...profileRow(profile),
-            }];
+            return finalizeLogin(config, values, ctx);
         },
     },
 
@@ -436,6 +487,61 @@ function write(out, text) {
     }
 }
 
+/** `--token @file` reads the token from a file instead of argv. */
+function readMaybeFile(value) {
+    const text = String(value || '').trim();
+    if (!text.startsWith('@')) return text;
+    const path = text.slice(1).trim();
+    try {
+        return readFileSync(path, 'utf-8');
+    } catch {
+        throw new ArgumentError(`Token file cannot be read: ${path}`);
+    }
+}
+
+/**
+ * Fallback login for non-TTY sessions (CI, ssh, piped stdin): print Feedly's
+ * developer page URL and read the pasted token instead of opening a browser.
+ */
+async function loginWithPaste(values, ctx, config, clientPatch) {
+    write(ctx.stderr, [
+        '',
+        'Sign in through the browser, then copy the refresh token it shows.',
+        `  1. Open ${FEEDLY_DEV_PAGE}`,
+        '  2. Approve access with your Feedly account',
+        '  3. Paste the refresh token (or the whole token JSON) below',
+        '',
+    ].join('\n'));
+
+    const answer = await promptLine('Token: ', { stdin: ctx.stdin, stderr: ctx.stderr });
+    const parsed = parseTokenInput(answer);
+    if (!parsed.refreshToken && !parsed.accessToken) {
+        throw new ArgumentError('No token was provided.', 'Re-run `feedly login` and paste the token from the Feedly page.');
+    }
+
+    const next = saveConfig(config, {
+        ...clientPatch,
+        ...(parsed.refreshToken ? { refresh_token: parsed.refreshToken } : {}),
+        ...(parsed.accessToken && !parsed.refreshToken
+            ? { access_token: parsed.accessToken, expires_at: undefined, expiresAt: undefined }
+            : {}),
+        ...(parsed.userId ? { user_id: parsed.userId } : {}),
+    });
+    return finalizeLogin(next, values, ctx);
+}
+
+/** Refresh/verify the stored token and report the account it belongs to. */
+async function finalizeLogin(config, values, ctx) {
+    if (values['no-verify'] === true) {
+        return [{ status: 'stored', path: config.path, id: config.userId, email: '', name: '' }];
+    }
+    const stored = config.refreshToken
+        ? await refreshAccessToken(config, { env: ctx.env })
+        : config;
+    const profile = await getProfile({ config: stored, ...ctx.api });
+    return [{ status: 'logged_in', path: stored.path, ...profileRow(profile) }];
+}
+
 function reportError(error, stderr, verbose) {
     const message = error?.message || String(error);
     write(stderr, `error: ${message}\n`);
@@ -499,6 +605,8 @@ export async function run(argv = [], io = {}) {
             if (cursor && format !== 'json') write(stderr, `${cursor}\n`);
             return 0;
         }
+
+        if (result === null) return 0;
 
         write(stdout, renderRows(result, { columns, format, wide: Boolean(values.wide) }));
         return 0;
