@@ -77,6 +77,74 @@ describe('entry normalization', () => {
             stream_id: 'feed/example',
             url: 'https://example.com',
             summary: 'Hello world',
+            // No entry.content, so content falls back to the summary text.
+            content: 'Hello world',
+        });
+    });
+
+    describe('body extraction (regression: full text used to be discarded)', () => {
+        const LONG = '<p>' + '正文'.repeat(3000) + '</p>'; // ~6000 chars of text
+
+        it('keeps a long summary when there is no content (36kr shape)', () => {
+            const row = normalizeEntry({ id: 'e', summary: { content: LONG } });
+            assert.ok(row.summary.length > 240, `summary was ${row.summary.length}`);
+            assert.equal(row.summary, row.content);
+        });
+
+        it('keeps content when summary is absent (V2EX shape)', () => {
+            const body = '<div>hello</div><br/>world';
+            const row = normalizeEntry({ id: 'e', content: { content: body } });
+            // Legacy fallback: summary mirrors the body when no RSS summary exists.
+            assert.equal(row.summary, 'hello\n\nworld');
+            assert.equal(row.content, 'hello\n\nworld');
+            assert.ok(!row.content.includes('<br'));
+        });
+
+        it('never returns less summary text than the pre-fix behaviour', () => {
+            const long = '<p>' + 'y'.repeat(5000) + '</p>';
+            // The old code copied content into summary when summary was missing,
+            // but sliced the result to 240 chars.
+            assert.ok(normalizeEntry({ id: 'e', content: { content: long } }).summary.length > 240);
+            assert.ok(normalizeEntry({ id: 'e', summary: { content: long } }).summary.length > 240);
+        });
+
+        it('keeps both when summary and content differ (TMTPost shape)', () => {
+            const row = normalizeEntry({
+                id: 'e',
+                summary: { content: '<p>short teaser</p>' },
+                content: { content: LONG },
+            });
+            assert.equal(row.summary, 'short teaser');
+            assert.ok(row.content.length > 240, `content was ${row.content.length}`);
+            assert.ok(row.content.length > row.summary.length);
+        });
+
+        it('degrades gracefully for short or missing bodies (Solidot/BBC shape)', () => {
+            const short = normalizeEntry({ id: 'e', summary: { content: '<p>tiny</p>' }, content: { content: '<p>tiny</p>' } });
+            assert.equal(short.summary, 'tiny');
+            assert.equal(short.content, 'tiny');
+
+            const empty = normalizeEntry({ id: 'e' });
+            assert.equal(empty.summary, '');
+            assert.equal(empty.content, '');
+        });
+
+        it('decodes entities and keeps paragraph breaks', () => {
+            const row = normalizeEntry({
+                id: 'e',
+                content: { content: '<p>a &amp; b</p><p>c &#8212; d</p><ul><li>one</li><li>two</li></ul>' },
+            });
+            assert.equal(row.content, 'a & b\n\nc — d\n\none\n\ntwo');
+        });
+
+        it('drops script/style noise without collapsing the body', () => {
+            const row = normalizeEntry({
+                id: 'e',
+                content: { content: '<style>p{color:red}</style><p>keep</p><script>alert(1)</script><p>also keep</p>' },
+            });
+            assert.match(row.content, /keep/);
+            assert.match(row.content, /also keep/);
+            assert.doesNotMatch(row.content, /color:red|alert/);
         });
     });
 
@@ -268,6 +336,7 @@ describe('content search', () => {
             stream_id: 'feed/example',
             url: 'https://example.com',
             summary: 'Hello world',
+            content: 'Hello world',
         }]);
     });
 

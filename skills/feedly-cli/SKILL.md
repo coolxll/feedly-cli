@@ -37,7 +37,21 @@ discovered.
 - Mark entries read: `feedly mark-read --ids ... --confirm MARK_READ`
 
 Prefer `--json` or `--jsonl` when parsing results. Table output truncates long
-titles/summaries (ids stay intact) and is meant for humans.
+titles/bodies (ids stay intact) and is meant for humans.
+
+## Article bodies are available
+
+Entries carry both `summary` (RSS teaser) and `content` (full text) **untruncated**
+in `--json`/`--jsonl`/`csv`/`tsv`. Read the body instead of the teaser, and
+prefer `content` (it falls back to the summary):
+
+```bash
+feedly unread --limit 20 --jsonl | jq -r '"\(.title)\n\(.content)\n"'
+feedly unread --limit 5 --columns id,title,content --wide
+```
+
+`content` is not a default table column; request it explicitly. Use
+`--body-limit <n>` to cap payload size and `--no-body` to omit bodies entirely.
 
 ## Search contents
 

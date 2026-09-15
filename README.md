@@ -156,6 +156,10 @@ Run `feedly <command> --help` for the full option list.
 feedly profile --json
 feedly unread --limit 20
 feedly unread --limit 50 --jsonl
+feedly unread --limit 50 --jsonl | jq -r '.content'        # full article bodies
+feedly unread --limit 20 --columns id,title,content --wide
+feedly unread --limit 50 --body-limit 1000 --json            # cap payload size
+feedly unread --limit 50 --no-body --jsonl                   # metadata only
 feedly unread --stream-id "user/<id>/category/global.all" --limit 10 --json
 
 # Discover stream ids, categories, and sources
@@ -209,10 +213,37 @@ See [docs/search-api.md](docs/search-api.md) for the verified layer shapes.
 shorthands.
 
 - `table` (default) aligns columns, honors CJK widths, and truncates long
-  titles/summaries at 60 characters. `id`, `stream_id`, and `url` are never
-  truncated so values stay copy-pastable. Use `--wide` to disable truncation.
+  titles/summaries/bodies at 60 characters. `id`, `stream_id`, and `url` are
+  never truncated so values stay copy-pastable. Use `--wide` to disable
+  truncation.
 - `json` pretty-prints the full array; `jsonl` emits one object per line.
 - `--columns id,title,url` projects and reorders columns.
+
+### Article bodies
+
+Feedly returns an RSS `summary` and often a much longer full-text `content`.
+Both are returned **in full** on `summary` and `content`; nothing is truncated
+on the way out, so `--json` / `--jsonl` / `csv` / `tsv` consumers get the whole
+article:
+
+- `content` falls back to the summary text when Feedly has no full text, and is
+  `""` when neither exists.
+- `content` is **not** in the default table columns (a 13KB body would wreck the
+  table). Ask for it explicitly:
+
+  ```bash
+  feedly unread --columns id,title,content --jsonl
+  ```
+- `--body-limit <n>` caps `summary`/`content` at `n` characters (off by default);
+  capped values end with `…[truncated <N> chars]`.
+- `--no-body` removes body columns from **every** format, including `json`.
+
+```bash
+feedly unread --limit 5 --jsonl | jq -r '.content'      # full bodies
+feedly unread --limit 5 --columns id,content --wide      # full bodies in a table
+feedly unread --limit 5 --body-limit 500 --json          # capped at 500 chars
+feedly unread --limit 5 --no-body --jsonl                # metadata only
+```
 
 `stream-page` prints the full `{ items, continuation }` object for `--format
 json`. With tabular formats only the items go to stdout and the cursor is

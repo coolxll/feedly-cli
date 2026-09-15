@@ -110,8 +110,17 @@ before(async () => {
                         published: 1_700_000_000_000,
                         origin: { title: 'Feed A', streamId: 'feed/a' },
                         alternate: [{ href: 'https://example.com/1' }],
+                        // TMTPost shape: short RSS summary next to a long full-text body.
+                        summary: { content: '<p>short teaser</p>' },
+                        content: { content: `<p>${'long body '.repeat(200)}</p>` },
                     },
-                    { id: 'entry-2', title: 'Second entry', origin: { title: 'Feed B', streamId: 'feed/b' } },
+                    // 36kr shape: no content block, but a long summary.
+                    {
+                        id: 'entry-2',
+                        title: 'Second entry',
+                        origin: { title: 'Feed B', streamId: 'feed/b' },
+                        summary: { content: `<p>${'summary only '.repeat(100)}</p>` },
+                    },
                 ],
             });
         }
@@ -182,6 +191,47 @@ describe('feedly CLI end to end', () => {
         const lines = stdout.trim().split('\n').map((line) => JSON.parse(line));
         assert.equal(lines.length, 2);
         assert.equal(lines[0].id, 'entry-1');
+    });
+
+    it('returns full article bodies through --json/--jsonl (regression)', async () => {
+        const { code, stdout } = await runCli(['unread', '--limit', '2', '--jsonl'], { env: cliEnv() });
+        assert.equal(code, 0);
+        const [first, second] = stdout.trim().split('\n').map((line) => JSON.parse(line));
+
+        // TMTPost shape: the long body survives, and summary stays the teaser.
+        assert.ok(first.content.length > 240, `content was ${first.content.length}`);
+        assert.match(first.content, /long body/);
+        assert.equal(first.summary, 'short teaser');
+
+        // 36kr shape: a long summary is no longer sliced to 240.
+        assert.ok(second.summary.length > 240, `summary was ${second.summary.length}`);
+        assert.equal(second.content, second.summary);
+    });
+
+    it('exposes content as an opt-in column and supports --body-limit/--no-body', async () => {
+        const selected = await runCli(['unread', '--limit', '1', '--columns', 'id,content', '--json'], { env: cliEnv() });
+        assert.equal(selected.code, 0);
+        const [row] = JSON.parse(selected.stdout);
+        // `--columns` projects tabular output but JSON keeps full rows.
+        assert.equal(row.id, 'entry-1');
+        assert.ok(row.content.length > 240, `content was ${row.content.length}`);
+
+        const limited = await runCli(['unread', '--limit', '1', '--body-limit', '50', '--json'], { env: cliEnv() });
+        assert.equal(limited.code, 0);
+        const capped = JSON.parse(limited.stdout)[0].content;
+        assert.ok(capped.startsWith('long body'), capped);
+        assert.match(capped, /…\[truncated \d+ chars\]$/);
+        // 50 chars of body plus the truncation marker, not the full 2000.
+        assert.ok(capped.length < 100, `capped was ${capped.length}`);
+
+        const noBody = await runCli(['unread', '--limit', '1', '--no-body', '--json'], { env: cliEnv() });
+        assert.equal(noBody.code, 0);
+        assert.equal('content' in JSON.parse(noBody.stdout)[0], false);
+        assert.equal('summary' in JSON.parse(noBody.stdout)[0], false);
+
+        const badLimit = await runCli(['unread', '--body-limit', 'abc'], { env: cliEnv() });
+        assert.equal(badLimit.code, 2);
+        assert.match(badLimit.stderr, /--body-limit must be a positive integer/);
     });
 
     it('renders tables and csv by default and with -f', async () => {

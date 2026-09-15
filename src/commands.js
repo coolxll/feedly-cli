@@ -9,7 +9,9 @@ import {
     resolveApiBases,
 } from './client.js';
 
-export const ENTRY_COLUMNS = ['id', 'title', 'author', 'published', 'origin_title', 'stream_id', 'url', 'summary'];
+export const ENTRY_COLUMNS = ['id', 'title', 'author', 'published', 'origin_title', 'stream_id', 'url', 'summary', 'content'];
+/** Default table/JSON projection. `content` is available but intentionally opt-in. */
+export const DEFAULT_ENTRY_COLUMNS = ['id', 'title', 'author', 'published', 'origin_title', 'stream_id', 'url', 'summary'];
 export const SEARCH_SCOPES = ['all', 'personal', 'business', 'tech'];
 
 function isRecord(value) {
@@ -96,11 +98,61 @@ function isoDate(ms) {
     return new Date(n).toISOString();
 }
 
-function stripHtml(value) {
-    return String(value || '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
+/**
+ * Minimal HTML entity decoding so bodies are readable as text.
+ */
+const NAMED_ENTITIES = {
+    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+    mdash: '—', ndash: '–', hellip: '…', middot: '·', bull: '•',
+    lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+    laquo: '«', raquo: '»', copy: '©', reg: '®', trade: '™', times: '×', deg: '°',
+};
+
+function decodeEntities(text) {
+    return text.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (match, body) => {
+        if (body[0] === '#') {
+            const hex = body[1] === 'x' || body[1] === 'X';
+            const code = Number.parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
+            if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return match;
+            try {
+                return String.fromCodePoint(code);
+            } catch {
+                return match;
+            }
+        }
+        const named = NAMED_ENTITIES[body.toLowerCase()];
+        return named === undefined ? match : named;
+    });
+}
+
+/**
+ * Block-level tags that should become paragraph breaks. Collapsing every tag to
+ * a space would flatten a 13KB article body into a single unreadable line.
+ */
+const BLOCK_TAGS = /<\/?(?:address|article|aside|blockquote|br|dd|div|dl|dt|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|table|tbody|td|tfoot|th|thead|tr|ul)\b[^>]*>/gi;
+const DROPPED_TAGS = /<(?:script|style|img|source|video|audio|iframe|object|embed|svg|noscript)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript)>|<(?:img|source|video|audio|iframe|object|embed|br|hr)\b[^>]*>/gi;
+
+export function stripHtml(value) {
+    const raw = String(value || '');
+    if (!raw) return '';
+
+    const text = raw
+        .replace(DROPPED_TAGS, (match) => (match.startsWith('</') || /^<(?:img|source|video|audio|iframe|object|embed|br|hr)\b/i.test(match) ? '\n' : ' '))
+        .replace(BLOCK_TAGS, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/[\t\r\f\v\u00a0]+/g, ' ')
+        .replace(/ *\n */g, '\n')
+        .replace(/ {2,}/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
         .trim();
+
+    return decodeEntities(text);
+}
+
+/** Extract a Feedly `{ content, direction }` text block, if present. */
+function textBlock(value) {
+    if (!isRecord(value)) return '';
+    return typeof value.content === 'string' ? value.content : '';
 }
 
 function firstAlternateUrl(entry) {
@@ -109,12 +161,23 @@ function firstAlternateUrl(entry) {
     return found?.href || '';
 }
 
+/**
+ * Normalize a Feedly entry.
+ *
+ * `summary` and `content` are extracted independently and returned **whole**;
+ * Feedly often has a short RSS `summary` next to a full-text `content`, and
+ * picking one with a ternary silently threw the article body away. Truncation
+ * is a presentation concern and happens in the output layer (or on demand via
+ * `--body-limit`).
+ */
 export function normalizeEntry(entry) {
     if (!isRecord(entry) || typeof entry.id !== 'string' || !entry.id.trim()) {
         throw new ApiError('Feedly returned an entry without a stable id.');
     }
     const origin = isRecord(entry.origin) ? entry.origin : {};
-    const summary = isRecord(entry.summary) ? entry.summary.content : isRecord(entry.content) ? entry.content.content : '';
+    const summaryText = textBlock(entry.summary);
+    const contentText = textBlock(entry.content);
+
     return {
         id: entry.id,
         title: String(entry.title || '').trim(),
@@ -123,7 +186,11 @@ export function normalizeEntry(entry) {
         origin_title: String(origin.title || '').trim(),
         stream_id: String(origin.streamId || '').trim(),
         url: firstAlternateUrl(entry) || String(origin.htmlUrl || '').trim(),
-        summary: stripHtml(summary).slice(0, 240),
+        // RSS teaser. Keeps the legacy fallback (summary, else body) so existing
+        // `.summary` consumers never get less text than before.
+        summary: stripHtml(summaryText || contentText),
+        // Full text, falling back to the summary when Feedly sends no body.
+        content: stripHtml(contentText || summaryText),
     };
 }
 

@@ -2,6 +2,14 @@ export const FORMATS = ['table', 'json', 'jsonl', 'tsv', 'csv'];
 export const DEFAULT_MAX_CELL_WIDTH = 60;
 
 /**
+ * Text columns that carry article bodies. They are never implicitly truncated:
+ * the data layer returns them whole, so `json`/`jsonl`/`csv`/`tsv` consumers see
+ * the full text. `table` truncates them for readability like any other cell,
+ * and callers can cap the payload explicitly with `--body-limit`.
+ */
+export const TEXT_COLUMNS = new Set(['summary', 'content']);
+
+/**
  * Display width of a string, counting East Asian wide characters as two
  * columns so tables stay aligned with CJK titles.
  */
@@ -59,6 +67,49 @@ function projectRow(row, columns) {
     return out;
 }
 
+/**
+ * Drop body columns entirely (`--no-body`). Unlike `--columns`, this applies to
+ * every format, including json/jsonl which otherwise emit full rows.
+ */
+export function dropBodyFields(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        let touched = false;
+        const next = { ...row };
+        for (const column of TEXT_COLUMNS) {
+            if (!(column in next)) continue;
+            delete next[column];
+            touched = true;
+        }
+        return touched ? next : row;
+    });
+}
+
+/**
+ * Apply an explicit, opt-in cap to text columns.
+ *
+ * Called only when the user asks for `--body-limit <n>`; by default bodies are
+ * returned in full. Truncation is marked with an ellipsis and a character count
+ * so consumers can tell the text is incomplete.
+ */
+export function limitBodyFields(rows, limit) {
+    if (!Number.isFinite(limit) || limit <= 0) return rows;
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        let touched = false;
+        const next = { ...row };
+        for (const column of TEXT_COLUMNS) {
+            const value = next[column];
+            if (typeof value !== 'string' || value.length <= limit) continue;
+            next[column] = `${value.slice(0, limit)}…[truncated ${value.length} chars]`;
+            touched = true;
+        }
+        return touched ? next : row;
+    });
+}
+
 function singleLine(text) {
     return String(text).replace(/\r?\n/g, ' ').replace(/\t/g, ' ').trim();
 }
@@ -110,8 +161,12 @@ export function renderRows(rows, {
     format = 'table',
     wide = false,
     maxWidth = DEFAULT_MAX_CELL_WIDTH,
+    bodyLimit = 0,
+    dropBody = false,
 } = {}) {
-    const list = Array.isArray(rows) ? rows : [];
+    let list = Array.isArray(rows) ? rows : [];
+    if (dropBody) list = dropBodyFields(list);
+    list = limitBodyFields(list, bodyLimit);
     const selected = columns.length > 0 ? columns : Object.keys(list[0] || {});
 
     switch (format) {
@@ -142,7 +197,14 @@ export function renderRows(rows, {
  */
 export function renderObject(result, options = {}) {
     if (options.format === 'json') {
-        return `${JSON.stringify(result, null, 2)}\n`;
+        // stream-page nests rows under `items`; keep the cursor while transforming bodies.
+        let items = result?.items;
+        if (Array.isArray(items)) {
+            if (options.dropBody) items = dropBodyFields(items);
+            items = limitBodyFields(items, options.bodyLimit);
+        }
+        const shaped = result && Array.isArray(result.items) ? { ...result, items } : result;
+        return `${JSON.stringify(shaped, null, 2)}\n`;
     }
     return renderRows(result?.items, options);
 }

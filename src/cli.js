@@ -14,6 +14,7 @@ import {
 } from './client.js';
 import {
     ENTRY_COLUMNS,
+    DEFAULT_ENTRY_COLUMNS,
     SEARCH_SCOPES,
     getCategories,
     getCounts,
@@ -27,7 +28,7 @@ import {
     profileRow,
     searchContents,
 } from './commands.js';
-import { FORMATS, objectCursorText, renderObject, renderRows } from './output.js';
+import { FORMATS, TEXT_COLUMNS, objectCursorText, renderObject, renderRows } from './output.js';
 import { FEEDLY_DEV_PAGE, openUrl, parseTokenInput, promptLine } from './login.js';
 import {
     AGENT_HINT,
@@ -52,7 +53,9 @@ const GLOBAL_OPTIONS = {
     json: { type: 'boolean', help: 'Same as --format json' },
     jsonl: { type: 'boolean', help: 'Same as --format jsonl' },
     format: { type: 'string', short: 'f', value: '<format>', help: `Output format (${FORMATS.join(', ')})` },
-    columns: { type: 'string', value: '<list>', help: 'Comma-separated columns to print' },
+    columns: { type: 'string', value: '<list>', help: 'Comma-separated columns to print (add `content` for article bodies)' },
+    'body-limit': { type: 'string', value: '<n>', help: 'Cap summary/content at n chars (default: no limit)' },
+    'no-body': { type: 'boolean', help: 'Drop the content column from the output' },
     wide: { type: 'boolean', help: 'Do not truncate long table cells' },
     config: { type: 'string', value: '<path>', help: 'Path to the Feedly config JSON' },
     timeout: { type: 'string', value: '<ms>', help: `HTTP timeout in milliseconds (default ${DEFAULT_TIMEOUT_MS})` },
@@ -81,6 +84,7 @@ const COMMANDS = {
             layers: { type: 'string', value: '<json|@file>', help: 'Advanced: structured search layers JSON or @file' },
         },
         columns: ENTRY_COLUMNS,
+        defaultColumns: DEFAULT_ENTRY_COLUMNS,
         run: async (values, ctx) => searchContents({
             query: values.query,
             layers: values.layers,
@@ -99,6 +103,7 @@ const COMMANDS = {
             'stream-id': STREAM_ID_OPTION,
         },
         columns: ENTRY_COLUMNS,
+        defaultColumns: DEFAULT_ENTRY_COLUMNS,
         run: async (values, ctx) => getUnreadEntries({
             limit: values.limit,
             streamId: values['stream-id'] || '',
@@ -116,6 +121,7 @@ const COMMANDS = {
             all: { type: 'boolean', help: 'Include read entries (default: unread only)' },
         },
         columns: ENTRY_COLUMNS,
+        defaultColumns: DEFAULT_ENTRY_COLUMNS,
         run: async (values, ctx) => getStreamPage({
             limit: values.limit,
             streamId: values['stream-id'] || '',
@@ -469,17 +475,32 @@ function resolveColumns(values, spec) {
         .split(',')
         .map((column) => column.trim())
         .filter(Boolean);
-    if (fromFlag.length === 0) return spec.columns || [];
 
     const known = spec.columns || [];
-    const unknown = fromFlag.filter((column) => !known.includes(column));
-    if (known.length > 0 && unknown.length > 0) {
-        throw new ArgumentError(
-            `Unknown column(s): ${unknown.join(', ')}`,
-            `Available columns for this command: ${known.join(', ')}.`,
-        );
+    if (fromFlag.length > 0) {
+        const unknown = fromFlag.filter((column) => !known.includes(column));
+        if (known.length > 0 && unknown.length > 0) {
+            throw new ArgumentError(
+                `Unknown column(s): ${unknown.join(', ')}`,
+                `Available columns for this command: ${known.join(', ')}.`,
+            );
+        }
     }
-    return fromFlag;
+
+    const explicit = fromFlag.length > 0 ? fromFlag : spec.defaultColumns || known;
+    // `--no-body` strips body text columns unless the user asked for them by name.
+    if (!values['no-body'] || fromFlag.length > 0) return explicit;
+    return explicit.filter((column) => !TEXT_COLUMNS.has(column));
+}
+
+function resolveBodyLimit(values) {
+    if (values['no-body']) return 0;
+    if (values['body-limit'] === undefined) return 0;
+    const limit = Number(values['body-limit']);
+    if (!Number.isInteger(limit) || limit < 1) {
+        throw new ArgumentError('--body-limit must be a positive integer (number of characters)');
+    }
+    return limit;
 }
 
 async function readStream(stream) {
@@ -706,6 +727,7 @@ export async function run(argv = [], io = {}) {
 
         const format = resolveFormat(values);
         const timeout = resolveTimeout(values);
+        const bodyLimit = resolveBodyLimit(values);
         const ctx = {
             env,
             stdin,
@@ -724,6 +746,12 @@ export async function run(argv = [], io = {}) {
 
         const result = await spec.run(values, ctx);
         const columns = resolveColumns(values, spec);
+        // `--no-body` also strips fields from json/jsonl, which emit full rows.
+        const explicitBody = String(values.columns || '')
+            .split(',')
+            .map((column) => column.trim())
+            .some((column) => TEXT_COLUMNS.has(column));
+        const dropBody = Boolean(values['no-body']) && !explicitBody;
 
         // Commands may return raw text (skill docs) instead of rows.
         if (typeof result === 'string') {
@@ -732,7 +760,7 @@ export async function run(argv = [], io = {}) {
         }
 
         if (spec.object) {
-            write(stdout, renderObject(result, { columns, format, wide: Boolean(values.wide) }));
+            write(stdout, renderObject(result, { columns, format, wide: Boolean(values.wide), bodyLimit, dropBody }));
             const cursor = objectCursorText(result);
             if (cursor && format !== 'json') write(stderr, `${cursor}\n`);
             return 0;
@@ -740,7 +768,7 @@ export async function run(argv = [], io = {}) {
 
         if (result === null) return 0;
 
-        write(stdout, renderRows(result, { columns, format, wide: Boolean(values.wide) }));
+        write(stdout, renderRows(result, { columns, format, wide: Boolean(values.wide), bodyLimit, dropBody }));
         return 0;
     } catch (error) {
         return reportError(error, stderr, verbose);

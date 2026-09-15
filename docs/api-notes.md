@@ -93,3 +93,24 @@ or `feed/<url>`.
   return plan-permission errors (HTTP 403).
 - Pagination uses an opaque `continuation`; loop until it is absent/empty or
   the requested count is reached.
+
+## Entry bodies
+
+A stream item carries two independent `{ content, direction }` blocks:
+
+- `summary.content` — the RSS teaser (often 100–500 chars)
+- `content.content` — the full article body (commonly 1KB–13KB)
+
+Both may be present, and either may be missing. Observed in one 20-item page:
+
+| feed | summary | content |
+| --- | --- | --- |
+| 36氪 | 12290 (no content) | absent |
+| 钛媒体 | 98 | 7650 |
+| V2EX | 0 | up to 4721 |
+| Solidot / BBC 中文 | 116–489 | absent |
+
+Do not pick one with a ternary — a short `summary` next to a long `content` is the
+common case, and choosing by presence silently discards the article. Read both,
+and fall back to the summary only when `content` is missing. Bodies contain raw
+HTML (paragraphs, `<br>`, entities), so strip tags for text output.
